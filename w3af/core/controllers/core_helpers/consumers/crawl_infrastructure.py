@@ -19,8 +19,8 @@ along with w3af; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 """
-import Queue
 import time
+import Queue
 
 import w3af.core.controllers.output_manager as om
 import w3af.core.data.kb.config as cf
@@ -30,8 +30,9 @@ from w3af.core.data.db.variant_db import VariantDB
 from w3af.core.data.bloomfilter.scalable_bloom import ScalableBloomFilter
 from w3af.core.data.request.fuzzable_request import FuzzableRequest
 
+from w3af.core.controllers.profiling.took_helper import TookLine
 from w3af.core.controllers.core_helpers.consumers.constants import POISON_PILL
-from w3af.core.controllers.exceptions import BaseFrameworkException, RunOnce
+from w3af.core.controllers.exceptions import BaseFrameworkException, RunOnce, ScanMustStopException
 from w3af.core.controllers.threads.threadpool import return_args
 from w3af.core.controllers.core_helpers.consumers.base_consumer import (BaseConsumer,
                                                                         task_decorator)
@@ -95,50 +96,80 @@ class crawl_infrastructure(BaseConsumer):
             else:
                 if work_unit == POISON_PILL:
 
-                    # Close the pool and wait for everyone to finish
-                    self._threadpool.close()
-                    self._threadpool.join()
-                    del self._threadpool
-                    self._running = False
-                    self._teardown()
+                    try:
+                        # Close the pool and wait for everyone to finish
+                        self._threadpool.close()
+                        self._threadpool.join()
+                        self._threadpool = None
 
-                    # Finish this consumer and everyone consuming the output
-                    self._out_queue.put(POISON_PILL)
-                    self.in_queue.task_done()
-                    break
+                        self._running = False
+                        self._teardown()
+                    finally:
+                        # Finish this consumer and everyone consuming the output
+                        self._out_queue.put(POISON_PILL)
+                        self.in_queue.task_done()
+                        break
 
                 else:
                     # With specific error/success handling just for debugging
                     try:
                         self._consume(work_unit)
-                    except KeyboardInterrupt:
-                        self.in_queue.task_done()
-                    except:
-                        self.in_queue.task_done()
-                    else:
+                    finally:
                         self.in_queue.task_done()
 
+                    # Free memory
                     work_unit = None
 
     def _teardown(self, plugin=None):
         """
         End plugins
         """
-        if plugin is None:
-            to_teardown = self._consumer_plugins
-        else:
-            to_teardown = [plugin, ]
+        to_teardown = self._consumer_plugins
 
-        # When we disable a plugin, we call .end() , so no need to call the
-        # same method twice
+        if plugin is not None:
+            to_teardown = [plugin]
+
+        # When we disable a plugin because it raised a RunOnceException,
+        # we call .end(), so no need to call the same method twice
         to_teardown = set(to_teardown) - self._disabled_plugins
 
+        msg = 'Starting CrawlInfra consumer _teardown() with %s plugins.'
+        om.out.debug(msg % len(to_teardown))
+
         for plugin in to_teardown:
+            om.out.debug('Calling %s.end().' % plugin.get_name())
+            start_time = time.time()
+
             try:
                 plugin.end()
-            except BaseFrameworkException, e:
-                om.out.error('The plugin "%s" raised an exception in the '
-                             'end() method: %s' % (plugin.get_name(), e))
+            except ScanMustStopException:
+                # If we reach this exception here we don't care much
+                # since the scan is ending already. The log message stating
+                # that the scan will end because of this error was already
+                # delivered by the HTTP client.
+                #
+                # We `pass` instead of `break` because some plugins might
+                # still be able to `end()` without sending HTTP requests to
+                # the remote server
+                msg_fmt = ('Spent %.2f seconds running %s.end() until a'
+                           ' scan must stop exception was raised.')
+                self._log_end_took(msg_fmt, start_time, plugin)
+
+            except Exception, e:
+                msg_fmt = ('Spent %.2f seconds running %s.end() until an'
+                           ' unhandled exception was found.')
+                self._log_end_took(msg_fmt, start_time, plugin)
+
+                self.handle_exception('crawl', plugin.get_name(), 'plugin.end()', e)
+
+            else:
+                msg_fmt = 'Spent %.2f seconds running %s.end().'
+                self._log_end_took(msg_fmt, start_time, plugin)
+
+            finally:
+                self._disabled_plugins.add(plugin)
+
+        om.out.debug('Finished CrawlInfra consumer _teardown().')
 
     @task_decorator
     def _consume(self, function_id, work_unit):
@@ -169,7 +200,7 @@ class crawl_infrastructure(BaseConsumer):
         """
         try:
             for observer in self._observers:
-                observer.crawl(fuzzable_request)
+                observer.crawl(self, fuzzable_request)
         except Exception, e:
             self.handle_exception('crawl_infrastructure',
                                   'crawl_infrastructure._run_observers()',
@@ -220,7 +251,6 @@ class crawl_infrastructure(BaseConsumer):
                     self.handle_exception(plugin.get_type(), plugin.get_name(),
                                           fuzzable_request, ve)
 
-
                 # The plugin has queued some results and now we need to analyze
                 # which of the returned fuzzable requests are new and should be
                 # put in the input_queue again.
@@ -249,8 +279,27 @@ class crawl_infrastructure(BaseConsumer):
         """
         # Clear all items in the input queue so no more work is performed
         while not self.in_queue.empty():
-            self.in_queue.get()
+            try:
+                self.in_queue.get_nowait()
+            except Queue.Empty:
+                # We get here in very rare cases where:
+                #
+                #  * Another thread (T1) is running and reading from in_queue
+                #  * Our thread (T2) asks if the queue is empty and gets False
+                #  * T1 reads from in_queue
+                #  * T2 reads from the queue but there are no more tasks there
+                #  * T2 locks for ever (at least that is what happen when self.in_queue.get()
+                #    was used instead of get_nowait()
+                #
+                msg = 'Handled race condition in %s consumer terminate()'
+                args = (self._thread_name,)
+                om.out.debug(msg % args)
+
+                continue
+
             self.in_queue.task_done()
+
+        om.out.debug('No more tasks in %s consumer input queue.' % self._thread_name)
 
         # Let the client know that I finished
         self.out_queue.put(POISON_PILL)
@@ -337,8 +386,7 @@ class crawl_infrastructure(BaseConsumer):
 
                 # Add it to the list of disabled plugins, and run the end()
                 # method
-                self._disabled_plugins.add(plugin_to_remove)
-                self._teardown(plugin_to_remove)
+                self._teardown(plugin=plugin_to_remove)
 
                 # TODO: unittest that they are really disabled after adding them
                 #       to the disabled_plugins set.
@@ -346,6 +394,9 @@ class crawl_infrastructure(BaseConsumer):
 
     def _is_new_fuzzable_request(self, plugin, fuzzable_request):
         """
+        Read the note on why it is a good idea to have two instances of VariantDB
+        in the framework instead of one in the web_spider._should_verify_extracted_url()
+
         :param plugin: The plugin that found these fuzzable requests
         :param fuzzable_request: A potentially new fuzzable request
 
@@ -378,7 +429,7 @@ class crawl_infrastructure(BaseConsumer):
         #
         # w3af has a cache, but its still a waste of time to send those requests.
         #
-        #   Now lets analyze this with more than one parameter. Spidered URIs:
+        #   Now lets analyze this with more than one parameter. Crawled URIs:
         #       - http://host.tld/?id=3739286&action=create
         #       - http://host.tld/?id=3739285&action=create
         #       - http://host.tld/?id=3739282&action=remove
@@ -401,9 +452,19 @@ class crawl_infrastructure(BaseConsumer):
         #       - http://host.tld/?id=payload1&action=remove
         #
         if not self._variant_db.append(fuzzable_request):
-            msg = 'Ignoring reference "%s" (it is simply a variant).'
-            msg %= fuzzable_request.get_uri()
-            om.out.debug(msg)
+
+            if not fuzzable_request.get_raw_data():
+                msg = ('Ignoring reference "%s" since it is simply a variant'
+                       ' of another URL seen before.')
+                msg %= fuzzable_request.get_uri()
+                om.out.debug(msg)
+            else:
+                msg = ('Ignoring form "%s" with parameters [%s] since it is'
+                       ' simply a variant of another form seen before.')
+                args = (fuzzable_request.get_uri(),
+                        ', '.join(fuzzable_request.get_raw_data().get_param_names()))
+                om.out.debug(msg % args)
+
             return False
 
         msg = 'New fuzzable request identified: "%s"'
@@ -442,7 +503,11 @@ class crawl_infrastructure(BaseConsumer):
         args = (plugin.get_name(), fuzzable_request.get_uri())
         om.out.debug('%s.discover(%s)' % args)
 
-        start_time = time.time()
+        took_line = TookLine(self._w3af_core,
+                             plugin.get_name(),
+                             'discover',
+                             debugging_id=None,
+                             method_params={'uri': fuzzable_request.get_uri()})
 
         # Status reporting
         status = self._w3af_core.status
@@ -475,6 +540,4 @@ class crawl_infrastructure(BaseConsumer):
                 self.handle_exception(plugin.get_type(), plugin.get_name(),
                                       fuzzable_request, ve)
 
-        spent_time = time.time() - start_time
-        args = (plugin.get_name(), fuzzable_request.get_uri(), spent_time)
-        om.out.debug('%s.discover(%s) took %.2f seconds to run' % args)
+        took_line.send()

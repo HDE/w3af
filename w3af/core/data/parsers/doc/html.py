@@ -37,11 +37,17 @@ class HTMLParser(SGMLParser):
     """
 
     # http://www.freeformatter.com/mime-types-list.html
-    IGNORE_CONTENT_TYPES = ('application', 'video', 'audio', 'image',
-                            'chemical', 'model')
+    IGNORE_CONTENT_TYPES = ('application',
+                            'video',
+                            'audio',
+                            'image',
+                            'chemical',
+                            'model')
     WILD_ACCEPT_CONTENT_TYPES = ('text', 'message')
-    SPECIFIC_ACCEPT_CONTENT_TYPES = ('text/html', 'application/hta',
-                                     'application/xhtml+xml', 'application/xml')
+    SPECIFIC_ACCEPT_CONTENT_TYPES = ('text/html',
+                                     'application/hta',
+                                     'application/xhtml+xml',
+                                     'application/xml')
 
     PARSE_TAGS = SGMLParser.PARSE_TAGS.union({'form', 'input', 'textarea',
                                               'select', 'option'})
@@ -107,6 +113,24 @@ class HTMLParser(SGMLParser):
             return False
 
         return False
+
+    @staticmethod
+    def count_links(body):
+        """
+        This method counts how many times the HTTP response body contains
+        a link.
+
+        The method is experimental and should be used with care. The count
+        is never going to be perfect, as we aim for speed and we just
+        count the number of '</a>' in the body.
+
+        I decided to count '</a>' as it will be much faster than applying a
+        regular expression such as '<a.*?href=.*?>' to the document.
+
+        :param body: HTTP response body as unicode string
+        :return: The number of links in the document
+        """
+        return body.lower().count('</a>')
 
     def _handle_script_tag_start(self, tag, tag_name, attrs):
         """

@@ -37,9 +37,6 @@ class CrawlPlugin(Plugin):
 
     :author: Andres Riancho (andres.riancho@gmail.com)
     """
-    # in seconds
-    PLUGIN_TIMEOUT = 5 * 60
-
     def crawl_wrapper(self, fuzzable_request):
         """
         Wrapper around the crawl method in order to perform some generic tasks.
@@ -90,13 +87,13 @@ class CrawlPlugin(Plugin):
         """
         fr = FuzzableRequest(url, method='GET')
 
-        http_response = self._uri_opener.send_mutant(fr, cache=True)
+        on_success = kwargs.pop('on_success', None)
+        http_response = self._uri_opener.send_mutant(fr, cache=True, *args, **kwargs)
 
         # The 204 check is because of Plugin.handle_url_error()
         if not is_404(http_response) and not http_response.get_code() == 204:
             self.output_queue.put(fr)
 
-            on_success = kwargs.get('on_success', None)
             if on_success is not None:
                 on_success(http_response, url, *args)
 

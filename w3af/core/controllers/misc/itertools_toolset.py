@@ -21,6 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 """
 import itertools
 import operator
+import hashlib
+
+from w3af.core.data.misc.encoding import smart_str_ignore
 
 #
 #    Source for this code was taken from http://docs.python.org/library/itertools.html
@@ -64,3 +67,27 @@ def unique_justseen(iterable, key=None):
     itemgetter = operator.itemgetter
     groupby = itertools.groupby
     return imap(next, imap(itemgetter(1), groupby(iterable, key)))
+
+
+def unique_everseen_hash(iterable):
+    """
+    List unique elements, preserving order.
+
+    Remember all elements ever seen, storing the hash of the element instead
+    of the element itself. This will reduce the memory usage in the case where
+    the element is large (an HTTP response body for example).
+
+    Recommendation: The iterable should generate strings / unicode.
+    """
+    seen = set()
+
+    for element in iterable:
+        m = hashlib.md5()
+        m.update(smart_str_ignore(element))
+        element_hash = m.digest()
+
+        if element_hash in seen:
+            continue
+
+        seen.add(element_hash)
+        yield element

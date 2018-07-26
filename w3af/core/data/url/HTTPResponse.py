@@ -28,12 +28,14 @@ from itertools import imap
 
 import w3af.core.controllers.output_manager as om
 import w3af.core.data.parsers.parser_cache as parser_cache
+
 from w3af.core.controllers.exceptions import BaseFrameworkException
+from w3af.core.controllers.misc.decorators import memoized
 from w3af.core.data.misc.encoding import smart_unicode, ESCAPED_CHAR
 from w3af.core.data.constants.encodings import DEFAULT_ENCODING
 from w3af.core.data.parsers.doc.url import URL
 from w3af.core.data.dc.headers import Headers
-from w3af.core.controllers.misc.decorators import memoized
+from w3af.core.data.db.disk_item import DiskItem
 
 
 DEFAULT_CHARSET = DEFAULT_ENCODING
@@ -50,7 +52,7 @@ CHARSET_META_RE = re.compile('<meta.*?content=".*?charset=\s*?([\w-]+)".*?>')
 DEFAULT_WAIT_TIME = 0.2
 
 
-class HTTPResponse(object):
+class HTTPResponse(DiskItem):
 
     DOC_TYPE_TEXT_OR_HTML = 'DOC_TYPE_TEXT_OR_HTML'
     DOC_TYPE_SWF = 'DOC_TYPE_SWF'
@@ -63,6 +65,7 @@ class HTTPResponse(object):
                  '_headers',
                  '_body',
                  '_raw_body',
+                 '_binary_response',
                  '_content_type',
                  '_dom',
                  'id',
@@ -80,7 +83,7 @@ class HTTPResponse(object):
 
     def __init__(self, code, read, headers, geturl, original_url,
                  msg='OK', _id=None, time=DEFAULT_WAIT_TIME, alias=None,
-                 charset=None):
+                 charset=None, binary_response=False, set_body=False):
         """
         :param code: HTTP code
         :param read: HTTP body text; typically a string
@@ -113,8 +116,19 @@ class HTTPResponse(object):
 
         self._charset = charset
         self._headers = None
-        self._body = None
-        self._raw_body = read
+
+        if set_body and isinstance(read, unicode):
+            # We use this case for deserialization via from_dict()
+            #
+            # The goal is to prevent the body to be analyzed for charset data
+            # once again, since it was already done during to_dict() in the
+            # get_body() call.
+            self._body = self._raw_body = read
+        else:
+            self._body = None
+            self._raw_body = read
+
+        self._binary_response = binary_response
         self._content_type = None
         self._dom = None
         # A unique id identifier for the response
@@ -145,7 +159,7 @@ class HTTPResponse(object):
         self._body_lock = threading.RLock()
 
     @classmethod
-    def from_httplib_resp(cls, httplibresp, original_url=None):
+    def from_httplib_resp(cls, httplibresp, original_url=None, binary_response=False):
         """
         Factory function. Build a HTTPResponse object from a
         httplib.HTTPResponse instance
@@ -179,9 +193,10 @@ class HTTPResponse(object):
             charset = getattr(resp, 'encoding', None)
         
         return cls(code, body, hdrs, url_inst, original_url,
-                   msg, charset=charset, time=httplib_time)
+                   msg, charset=charset, time=httplib_time,
+                   binary_response=binary_response)
 
-    @classmethod    
+    @classmethod
     def from_dict(cls, unserialized_dict):
         """
         * msgpack is MUCH faster than cPickle,
@@ -191,37 +206,59 @@ class HTTPResponse(object):
         
         :param unserialized_dict: A dict just as returned by to_dict()
         """
-        udict = unserialized_dict
-        
-        code, msg, hdrs = udict['code'], udict['msg'], udict['headers']
-        body, _time, _id = udict['body'], udict['time'], udict['id']
-        
-        headers_inst = Headers(hdrs.items())
-        url = URL(udict['uri'])
-    
-        return cls(code, body, headers_inst, url, url, msg=msg, _id=_id,
-                   time=_time)
+        code = unserialized_dict['code']
+        msg = unserialized_dict['msg']
+        headers = unserialized_dict['headers']
+        body = unserialized_dict['body']
+        charset = unserialized_dict['charset']
+        _time = unserialized_dict['time']
+        _id = unserialized_dict['id']
+        url = URL(unserialized_dict['uri'])
+
+        headers_inst = Headers(headers.items())
+
+        return cls(code, body, headers_inst, url, url,
+                   msg=msg,
+                   _id=_id,
+                   time=_time,
+                   charset=charset,
+                   set_body=True)
 
     def to_dict(self):
         """
         :return: A dict that represents the current object and is serializable
                  by the json or msgpack modules.
         """
-        serializable_dict = {}
-        sdict = serializable_dict
-        
         # Note: The Headers() object can be serialized by msgpack because it
         #       inherits from dict() and doesn't mangle it too much
-        sdict['code'], sdict['msg'], sdict['headers'] = (self.get_code(),
-                                                         self.get_msg(),
-                                                         dict(self.get_headers()))
-        sdict['body'], sdict['time'], sdict['id'] = (self.get_body(),
-                                                     self.get_wait_time(),
-                                                     self.get_id())
-        
-        sdict['uri'] = self.get_uri().url_string
-    
-        return serializable_dict
+        return {'headers': dict(self.get_headers()),
+                'code': self.get_code(),
+                'msg': self.get_msg(),
+                'body': self.get_body(),
+                'time': self.get_wait_time(),
+                'id': self.get_id(),
+                'charset': self.get_charset(),
+                'uri': self.get_uri().url_string}
+
+    def get_eq_attrs(self):
+        return ('_code',
+                '_charset',
+                '_headers',
+                '_body',
+                '_raw_body',
+                '_binary_response',
+                '_content_type',
+                'id',
+                '_from_cache',
+                '_info',
+                '_realurl',
+                '_uri',
+                '_redirected_url',
+                '_redirected_uri',
+                '_msg',
+                '_time',
+                '_alias',
+                '_doc_type')
 
     def __contains__(self, string_to_test):
         """
@@ -264,8 +301,11 @@ class HTTPResponse(object):
         with self._body_lock:
             if self._body is None:
                 self._body, self._charset = self._charset_handling()
-                # Free 'raw_body'
-                self._raw_body = None
+
+                # The user wants the raw body, without any modifications / decoding?
+                if not self._binary_response:
+                    self._raw_body = None
+
             return self._body
 
     def set_body(self, body):
@@ -282,6 +322,21 @@ class HTTPResponse(object):
         self._raw_body = body
 
     body = property(get_body, set_body)
+
+    def get_raw_body(self):
+        """
+        Return the raw body as it came from the wire.
+
+        This is useful when we want to parse binary files such as images and DS_Store.
+
+        IMPORTANT! Because we want to save some memory the raw body will be set
+                   to None after the first call to get_body(), so please use
+                   binary_response in your requests in order to let us know
+                   that you want the raw body
+
+        :return: The raw body as it came from the wire
+        """
+        return self._raw_body
 
     def get_clear_text_body(self):
         """

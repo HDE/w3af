@@ -20,7 +20,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 """
 import w3af.core.data.parsers.parser_cache as parser_cache
-import w3af.core.controllers.output_manager as om
 
 from w3af.core.controllers.plugins.grep_plugin import GrepPlugin
 from w3af.core.controllers.exceptions import BaseFrameworkException
@@ -72,8 +71,6 @@ class get_emails(GrepPlugin):
         try:
             dp = parser_cache.dpc.get_document_parser_for(response)
         except BaseFrameworkException:
-            msg = 'Failed to get document parser for "%s" at get_emails.'
-            om.out.debug(msg % response.get_url())
             return
 
         emails = set(dp.get_emails(domain))
@@ -96,7 +93,7 @@ class get_emails(GrepPlugin):
 
             # Create a new info object, and report it
             desc = 'The mail account: "%s" was found at "%s".'
-            desc = desc % (mail_address, url)
+            desc %= (mail_address, url)
 
             i = Info('Email address disclosure', desc, response.id,
                      self.get_name())

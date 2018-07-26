@@ -34,7 +34,11 @@ class DocumentParser(object):
     :author: Andres Riancho (andres.riancho@gmail.com)
     """
     # WARNING! The order of this list is important. See note below
-    PARSERS = [WMLParser, JavaScriptParser, PDFParser, SWFParser, HTMLParser]
+    PARSERS = [WMLParser,
+               JavaScriptParser,
+               PDFParser,
+               SWFParser,
+               HTMLParser]
 
     def __init__(self, http_resp):
         """
@@ -63,6 +67,17 @@ class DocumentParser(object):
         if self._parser is None:
             msg = 'There is no parser for "%s".' % http_resp.get_url()
             raise BaseFrameworkException(msg)
+
+    @staticmethod
+    def can_parse(http_resp):
+        if http_resp.is_image():
+            return False
+
+        for parser in DocumentParser.PARSERS:
+            if parser.can_parse(http_resp):
+                return True
+
+        return False
 
     def get_forms(self):
         """
@@ -132,6 +147,9 @@ class DocumentParser(object):
 
     def clear(self):
         return self._parser.clear()
+
+    def get_parser(self):
+        return self._parser
 
     def __repr__(self):
         if self._parser:

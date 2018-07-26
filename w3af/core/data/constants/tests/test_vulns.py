@@ -112,6 +112,7 @@ class TestVulnsConstants(unittest.TestCase):
         vuln_names = VULNS.keys()
         all_plugin_sources = self.get_all_plugins_source()
         missing_ignore = {'TestCase',
+                          'Target redirect',
                           'Blind SQL injection vulnerability'}
 
         for vuln_name in vuln_names:
@@ -146,7 +147,7 @@ class TestVulnsConstants(unittest.TestCase):
             if _id is None:
                 continue
 
-            if not DBVuln.is_valid_id(_id):
+            if not DBVuln.is_valid_id(_id, language=DBVuln.DEFAULT_LANG):
                 invalid.append((vuln_name, _id))
 
         self.assertEqual(invalid, [])

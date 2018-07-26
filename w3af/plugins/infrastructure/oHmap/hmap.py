@@ -20,23 +20,27 @@
 #  You can reach me at <leed@cs.ucdavis.edu>
 ######################################################################
 
+import re
+import os
+import ssl
 import sys
 import glob
-import re
 import time
 import socket
 import select
-import os
 
-import w3af.core.controllers.output_manager as om
 import w3af.core.data.kb.config as cf
+import w3af.core.controllers.output_manager as om
 
 from w3af import ROOT_PATH
 from w3af.core.controllers.exceptions import BaseFrameworkException
+from w3af.core.controllers.threads.threadpool import Pool
 
 
 class request:
-    """Collect elements needed to send a Request to an HTTP server"""
+    """
+    Collect elements needed to send a Request to an HTTP server
+    """
     def __init__(self, url, method='GET', local_uri='/', version='1.0'):
         self.url = url
         self.method = method
@@ -57,89 +61,120 @@ class request:
                                      ['%s: %s' % (x, y) for x, y in self.headers]) + \
                                     (2 * self.line_joiner) + self.body
 
+    def get_connection(self):
+        HOST = self.url
+
+        # Create the connection
+        try:
+            si = socket.getaddrinfo(HOST, PORT)
+            if si[0][0] == 10:
+                s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            else:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((HOST, PORT))
+        except Exception, e:
+            msg = 'hmap connection failed to %s:%s. Exception: "%s"'
+            args = (HOST, PORT, e)
+            raise BaseFrameworkException(msg % args)
+
+        # SSL handling
+        if useSSL:
+            try:
+                s2 = ssl.wrap_socket(s)
+            except Exception, e:
+                msg = 'hmap SSL connection failed to %s:%s. Exception: "%s"'
+                args = (HOST, PORT, e)
+                raise BaseFrameworkException(msg % args)
+
+            s.recv = s2.read
+            s.send = s2.write
+
+        return s
+
     def submit(self):
         om.out.debug('hmap is sending: ' + str(self))
-        # Echo client program
-        HOST = self.url
 
         tries = 3
         wait_time = 1
+
         while tries != 0:
-            if tries < 3 and VERBOSE:
-                print '!!! TRIES =', tries
-            # Added by Andres Riancho to get SSL support !
+            s = self.get_connection()
+
+            data = ''
+
+            # Send the "HTTP request" to the socket
             try:
-                si = socket.getaddrinfo(HOST, PORT)
-                if si[0][0] == 10:
-                    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-                else:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((HOST, PORT))
-            except:
-                raise BaseFrameworkException(
-                    'Connection failed to ' + str(HOST) + ':' + str(PORT))
-            else:
+                s.send(str(self))
+            except Exception, e:
+                om.out.debug('hmap failed to send data to socket: "%s"' % e)
 
-                if useSSL:
-                    try:
-                        s2 = socket.ssl(s)
-                    except:
-                        raise BaseFrameworkException('SSL Connection failed to ' +
-                                            str(HOST) + ':' + str(PORT))
-                    else:
-                        s.recv = s2.read
-                        s.send = s2.write
+                # Try again
+                tries -= 1
+                time.sleep(wait_time)
+                wait_time *= 2
+                s.close()
 
-                data = ''
+                continue
 
-                try:
-                    s.send(str(self))
-                except:
-                    om.out.debug('Failed to send data to socket.')
-                    # Try again
-                    tries -= 1
-                    time.sleep(wait_time)
-                    wait_time *= 2
-                    s.close()
-                    continue
+            # Receive the HTTP response from the server
+            try:
+                while True:
+                    readable, writable, exceptional = select.select([s], [], [], 10)
+                    if not readable:
+                        break
 
-                ss = s
-                try:
-                    while True:
-                        ss = select.select([s], [], [], 10)[0]
-                        if not ss:
-                            break
-                        ss = ss[0]
-                        temp = ss.recv(1024)
-                        if not temp:
-                            break
-                        data += temp  # TODO:  more efficient to append to list
-                    s.close()
-                except KeyboardInterrupt, e:
-                    raise e
-                except socket.sslerror, sslerr:
-                    # When the remote server has no more data to send
-                    # It simply closes the remote connection, which raises:
-                    # (6, 'TLS/SSL connection has been closed')
-                    if sslerr[0] == 6:
-                        return response(data)
-                    else:
-                        # Try again
-                        tries -= 1
-                        time.sleep(wait_time)
-                        wait_time *= 2
-                        s.close()
-                        continue
+                    # s_read will always be "s", since it is the only socket we have
+                    s_read = readable[0]
+                    temp = s_read.recv(1)
 
-                except Exception:
-                    # Try again.
-                    tries -= 1
-                    time.sleep(wait_time)
-                    wait_time *= 2
-                    s.close()
-                    continue
-                break
-        return response(data)
+                    if not temp:
+                        break
+
+                    # we were able to read from the socket, append and try again
+                    data += temp
+            except KeyboardInterrupt, e:
+                raise e
+
+            except socket.sslerror, ssl_err:
+                # When the remote server has no more data to send
+                # It simply closes the remote connection, which raises:
+                # (6, 'TLS/SSL connection has been closed')
+                if ssl_err[0] == 6:
+                    return response(data)
+
+                msg = 'hmap found an SSL error while reading data from socket: "%s"'
+                om.out.debug(msg % ssl_err)
+
+                # Try again
+                tries -= 1
+                time.sleep(wait_time)
+                wait_time *= 2
+                s.close()
+
+                continue
+
+            except Exception, e:
+                msg = 'hmap found an exception while reading data from socket: "%s"'
+                om.out.debug(msg % e)
+
+                # Try again.
+                tries -= 1
+                time.sleep(wait_time)
+                wait_time *= 2
+                s.close()
+
+                continue
+
+            finally:
+                s.close()
+
+            # Success!
+            msg = 'hmap received: "%s..."' % repr(data)[1:-1][:40]
+            om.out.debug(msg)
+            return response(data)
+
+        # Something happen... we just return an empty response
+        return response('')
 
     def add_header(self, name, data):
         self.headers.append([name, data])
@@ -237,27 +272,33 @@ class response:
 # Functions for probing server and collecting characteristics
 
 
-def get_fingerprint(url):
-    basic_get(url)  # TODO: this is redundant with later test...
-    basic_options(url)
-    unknown_method(url)
-    unauthorized_activity(url)
-    nonexistant_object(url)
-    malformed_method_line(url)
-    long_url_ranges(url)
-    long_default_ranges(url)
-    many_header_ranges(url)
-    large_header_ranges(url)
-    unavailable_accept(url)
-    fake_content_length(url)
-    ### TODO some more tests to add:
-    # compare_get_head_header_order  n ## see if body sent back??
-       # also see if get same headers in same order
-    # require_host
-    # unmodified_since  # also with sending bad date
+def get_fingerprint(url, threads):
+    pool = Pool(worker_names='HMap',
+                maxtasksperchild=2,
+                processes=threads,
+                max_queued_tasks=5)
 
-    fingerprint['SYNTACTIC']['HEADER_ORDER'] = winnow_ordered_list(
-        fingerprint['SYNTACTIC']['HEADER_ORDER'])
+    tests = {basic_get,
+             basic_options,
+             unknown_method,
+             unauthorized_activity,
+             nonexistant_object,
+             malformed_method_line,
+             long_url_ranges,
+             long_default_ranges,
+             many_header_ranges,
+             large_header_ranges,
+             unavailable_accept,
+             fake_content_length}
+
+    for test in tests:
+        pool.apply_async(func=test, args=(url,))
+
+    pool.close()
+    pool.join()
+    pool.terminate()
+
+    fingerprint['SYNTACTIC']['HEADER_ORDER'] = winnow_ordered_list(fingerprint['SYNTACTIC']['HEADER_ORDER'])
     return fingerprint
 
 
@@ -914,7 +955,7 @@ PORT = 80
 useSSL = False
 
 
-def testServer(ssl, server, port, matchCount, generateFP):
+def testServer(ssl, server, port, matchCount, generateFP, threads):
     global VERBOSE
     global PORT
     global useSSL
@@ -923,11 +964,11 @@ def testServer(ssl, server, port, matchCount, generateFP):
     useSSL = ssl
 
     MATCH_COUNT = matchCount
-    fingerprintDir = os.path.join(ROOT_PATH, 'plugins', 'infrastructure',
-                                  'oHmap', 'known.servers/')
+    fingerprintDir = os.path.join(ROOT_PATH, 'plugins', 'infrastructure', 'oHmap', 'known.servers/')
+
     # Get the fingerprint
     target_url = server
-    fp = get_fingerprint(target_url)
+    fp = get_fingerprint(target_url, threads)
 
     # Read the fingerprint db
     known_servers = []

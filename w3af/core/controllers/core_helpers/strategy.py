@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 """
 import sys
+import time
 import Queue
 
 from multiprocessing import TimeoutError
@@ -64,7 +65,20 @@ class CoreStrategy(object):
     def __init__(self, w3af_core):
         self._w3af_core = w3af_core
         
-        self.set_consumers_to_none()
+        # Consumer threads
+        self._grep_consumer = None
+        self._audit_consumer = None
+        self._auth_consumer = None
+
+        # Producer/consumer threads
+        self._discovery_consumer = None
+        self._bruteforce_consumer = None
+
+        # Producer threads
+        self._seed_producer = seed(self._w3af_core)
+
+        # Also use this method to clear observers
+        self._observers = []
         
     def set_consumers_to_none(self):
         # Consumer threads
@@ -113,18 +127,16 @@ class CoreStrategy(object):
             exc_info = sys.exc_info()
 
             try:
-                # Terminate the consumers, exceptions at this level stop the
-                # scan
+                # Terminate the consumers, exceptions at this level stop the scan
                 self.terminate()
-
+            except Exception, e:
+                msg = 'strategy.start() found exception while terminating workers "%s"'
+                om.out.debug(msg % e)
+            finally:
                 # While the consumers might have finished, they certainly queue
                 # tasks in the core's worker_pool, which need to be processed
                 # too
                 self._w3af_core.worker_pool.finish()
-            except Exception, e:
-                msg = ('strategy.start() found exception while terminating'
-                       ' workers "%s"')
-                om.out.debug(msg % e)
 
             raise exc_info[0], exc_info[1], exc_info[2]
 
@@ -135,6 +147,9 @@ class CoreStrategy(object):
             # While the consumers might have finished, they certainly queue
             # tasks in the core's worker_pool, which need to be processed too
             self._w3af_core.worker_pool.finish()
+
+            # And also teardown all the observers
+            self._teardown_observers()
 
     def stop(self):
         self.terminate()
@@ -156,6 +171,9 @@ class CoreStrategy(object):
             consumer_inst = getattr(self, '_%s_consumer' % consumer)
 
             if consumer_inst is not None:
+                om.out.debug('Calling terminate() on %s consumer' % consumer)
+                start = time.time()
+
                 # Set it immediately to None to avoid any race conditions where
                 # the terminate() method is called twice (from different
                 # threads) and before the first call finishes
@@ -165,7 +183,15 @@ class CoreStrategy(object):
                 # you know what you're doing!
                 setattr(self, '_%s_consumer' % consumer, None)
 
-                consumer_inst.terminate()
+                try:
+                    consumer_inst.terminate()
+                except Exception, e:
+                    msg = '%s consumer terminate() raised exception: "%s"'
+                    om.out.debug(msg % e)
+                else:
+                    spent = time.time() - start
+                    args = (consumer, spent)
+                    om.out.debug('terminate() on %s consumer took %.2f seconds' % args)
 
         self.set_consumers_to_none()
 
@@ -176,13 +202,15 @@ class CoreStrategy(object):
         finish the consumers that generate URLs and then the ones that consume
         them.
         """
+        om.out.debug('Joining all consumers (teardown phase)')
+
         self._teardown_crawl_infrastructure()        
         
         self._teardown_audit()
         self._teardown_bruteforce()
                 
         self._teardown_auth()
-        self._teardown_grep()        
+        self._teardown_grep()
 
     def add_observer(self, observer):
         self._observers.append(observer)
@@ -474,6 +502,7 @@ class CoreStrategy(object):
         #    try/except block.
         #
         from w3af.core.controllers.core_helpers.fingerprint_404 import is_404
+        targets_with_404 = []
 
         for url in cf.cf.get('targets'):
             try:
@@ -487,7 +516,7 @@ class CoreStrategy(object):
                 raise ScanMustStopException(msg % args)
 
             try:
-                is_404(response)
+                current_target_is_404 = is_404(response)
             except ScanMustStopByUserRequest:
                 raise
             except Exception, e:
@@ -496,6 +525,20 @@ class CoreStrategy(object):
                        ' (%s).')
                 args = (url, e, e.__class__.__name__)
                 raise ScanMustStopException(msg % args)
+            else:
+                if current_target_is_404:
+                    targets_with_404.append(url)
+
+        if targets_with_404:
+            urls = ' - %s\n'.join(u.url_string for u in targets_with_404)
+            om.out.information('w3af identified the following user-configured'
+                               ' targets as non-existing pages (404). This could'
+                               ' result in a scan with low coverage: not all'
+                               ' areas of the application are scanned. Please'
+                               ' manually verify that these URLs exist and, if'
+                               ' required, run the scan again.\n'
+                               '\n'
+                               '%s\n' % urls)
 
     def _setup_crawl_infrastructure(self):
         """
@@ -526,8 +569,7 @@ class CoreStrategy(object):
 
         if grep_plugins:
             self._grep_consumer = grep(grep_plugins, self._w3af_core)
-            grep_qput = self._grep_consumer.in_queue_put
-            self._w3af_core.uri_opener.set_grep_queue_put(grep_qput)
+            self._w3af_core.uri_opener.set_grep_queue_put(self._grep_consumer.grep)
             self._grep_consumer.start()
 
     def _teardown_grep(self):
@@ -555,6 +597,10 @@ class CoreStrategy(object):
         if self._discovery_consumer is not None:
             self._discovery_consumer.join()
             self._discovery_consumer = None
+
+    def _teardown_observers(self):
+        for observer in self._observers:
+            observer.end()
 
     def _seed_discovery(self):
         """
