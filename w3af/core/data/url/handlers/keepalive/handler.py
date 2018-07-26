@@ -83,13 +83,6 @@ class KeepAliveHandler(object):
         # Map hosts to a `collections.deque` of response status.
         self._hostresp = {}
 
-    def get_open_connections(self):
-        """
-        Return a list of connected hosts and the number of connections
-        to each.  [('foo.com:80', 2), ('bar.org', 1)]
-        """
-        return [(host, len(li)) for (host, li) in self._cm.get_all().items()]
-
     def close_connection(self, host):
         """
         Close connection(s) to <host>
@@ -103,9 +96,8 @@ class KeepAliveHandler(object):
         """
         Close all open connections
         """
-        for conns in self._cm.get_all().values():
-            for conn in conns:
-                self._cm.remove_connection(conn, reason='close all connections')
+        for conn in self._cm.get_all():
+            self._cm.remove_connection(conn, reason='close all connections')
 
     def _request_closed(self, connection):
         """
@@ -167,13 +159,19 @@ class KeepAliveHandler(object):
             self._cm.remove_connection(conn, host, reason='socket error')
             raise
 
+        except Exception, e:
+            # We better discard this connection, we don't even know what happen!
+            reason = 'unexpected exception "%s"' % e
+            self._cm.remove_connection(conn, host, reason=reason)
+            raise
+
+        # How many requests were sent with this connection?
+        conn.inc_req_count()
+
         # If not a persistent connection, or the user specified that he wanted
         # a new connection for this specific request, don't try to reuse it
         if resp.will_close or req.new_connection:
             self._cm.remove_connection(conn, host, reason='will close')
-
-        # How many requests were sent with this connection?
-        conn.inc_req_count()
 
         # This response seems to be fine
         resp._handler = self
@@ -194,15 +192,19 @@ class KeepAliveHandler(object):
             # https://github.com/andresriancho/w3af/issues/2074
             self._cm.remove_connection(conn, host, reason='http connection died')
             raise HTTPRequestException('The HTTP connection died')
+        except Exception, e:
+            # We better discard this connection, we don't even know what happen!
+            reason = 'unexpected exception while reading "%s"' % e
+            self._cm.remove_connection(conn, host, reason=reason)
+            raise
 
         # We measure time here because it's the best place we know of
         elapsed = time.time() - start
         resp.set_wait_time(elapsed)
 
-        debug("HTTP response: %s - %s - %s with %s" % (req.get_selector(),
-                                                       resp.status,
-                                                       resp.reason,
-                                                       conn))
+        msg = "HTTP response: %s - %s - %s with %s in %s seconds"
+        args = (req.get_selector(), resp.status, resp.reason, conn, elapsed)
+        debug(msg % args)
 
         return resp
 
@@ -235,12 +237,23 @@ class KeepAliveHandler(object):
             # note: just because we got something back doesn't mean it
             # worked.  We'll check the version below, too.
         except (socket.error, httplib.HTTPException), e:
+            self._cm.remove_connection(conn, host, reason='socket error')
             resp = None
             reason = e
         except OpenSSL.SSL.ZeroReturnError, e:
             # According to the pyOpenSSL docs ZeroReturnError means that the
             # SSL connection has been closed cleanly
             self._cm.remove_connection(conn, host, reason='ZeroReturnError')
+            resp = None
+            reason = e
+        except OpenSSL.SSL.SysCallError, e:
+            # Not sure why we're getting this exception when trying to reuse a
+            # connection (but not when doing the initial request). So we just
+            # ignore the exception and go on.
+            #
+            # A new connection will be created and the scan should continue without
+            # problems
+            self._cm.remove_connection(conn, host, reason='OpenSSL.SSL.SysCallError')
             resp = None
             reason = e
         except Exception, e:
@@ -273,10 +286,26 @@ class KeepAliveHandler(object):
 
         return resp
 
+    def _update_socket_timeout(self, conn, request):
+        """
+        If the HttpConnection instance has an active socket connection,
+        then we update the timeout.
+
+        :param conn: The HTTPConnection
+        :param request: The new request to be sent via the connection
+        :return: None, we just update conn
+        """
+        if conn.sock is None:
+            return
+
+        if isinstance(conn, HTTPConnection):
+            conn.sock.settimeout(request.get_timeout())
+
     def _start_transaction(self, conn, req):
         """
         The real workhorse.
         """
+        self._update_socket_timeout(conn, req)
         try:
             conn.putrequest(req.get_method(), req.get_selector(),
                             skip_host=1, skip_accept_encoding=1)

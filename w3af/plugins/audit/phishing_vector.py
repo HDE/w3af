@@ -21,9 +21,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 """
 from __future__ import with_statement
 
+import w3af.core.controllers.output_manager as om
 import w3af.core.data.constants.severity as severity
+import w3af.core.data.parsers.parser_cache as parser_cache
 
-from w3af.core.data.parsers.mp_document_parser import mp_doc_parser
 from w3af.core.data.fuzzer.fuzzer import create_mutants
 from w3af.core.controllers.plugins.audit_plugin import AuditPlugin
 from w3af.core.data.kb.vuln import Vuln
@@ -38,30 +39,50 @@ class phishing_vector(AuditPlugin):
 
     TAGS = ('iframe', 'frame')
 
-    def __init__(self):
-        AuditPlugin.__init__(self)
+    # I test this with different URL handlers because the developer may have
+    # blacklisted http:// and https:// but missed ftp://.
+    #
+    # I also use hTtp instead of http because I want to evade some (stupid)
+    # case sensitive filters
+    TEST_URLS = ('hTtp://w3af.org/',
+                 'htTps://w3af.org/',
+                 'fTp://w3af.org/',
+                 '//w3af.org')
 
-        # I test this with different URL handlers because the developer may have
-        # blacklisted http:// and https:// but missed ftp://.
-        #
-        # I also use hTtp instead of http because I want to evade some (stupid)
-        # case sensitive filters
-        self._test_urls = ('hTtp://w3af.org/',
-                           'htTps://w3af.org/',
-                           'fTp://w3af.org/',
-                           '//w3af.org')
-
-    def audit(self, freq, orig_response):
+    def audit(self, freq, orig_response, debugging_id):
         """
         Find those phishing vectors!
 
         :param freq: A FuzzableRequest
+        :param orig_response: The HTTP response associated with the fuzzable request
+        :param debugging_id: A unique identifier for this call to audit()
         """
-        mutants = create_mutants(freq, self._test_urls)
+        mutants = create_mutants(freq, self.TEST_URLS)
 
         self._send_mutants_in_threads(self._uri_opener.send_mutant,
                                       mutants,
-                                      self._analyze_result)
+                                      self._analyze_result,
+                                      debugging_id=debugging_id)
+
+        om.out.debug('Finished audit.phishing_vector (did=%s)' % debugging_id)
+
+    def _contains_payload(self, response):
+        """
+        get_tags_by_filter is CPU-intensive (but cached whenever possible), and
+        we want to prevent calls to it, so we first check if the HTTP response
+        body contains the payloads we sent.
+
+        :param response: The HTTP response body
+        :return: True if the response body contains at least one of the payloads
+        """
+        body = response.body
+        body = body.lower()
+
+        for test_url in self.TEST_URLS:
+            if test_url.lower() in body:
+                return True
+
+        return False
 
     def _analyze_result(self, mutant, response):
         """
@@ -73,12 +94,17 @@ class phishing_vector(AuditPlugin):
         if self._has_bug(mutant):
             return
 
-        for tag in mp_doc_parser.get_tags_by_filter(response, self.TAGS):
+        # Performance improvement to prevent calling the CPU-expensive
+        # get_tags_by_filter
+        if not self._contains_payload(response):
+            return
+
+        for tag in parser_cache.dpc.get_tags_by_filter(response, self.TAGS):
             src_attr = tag.attrib.get('src', None)
             if src_attr is None:
                 continue
 
-            for url in self._test_urls:
+            for url in self.TEST_URLS:
                 if not src_attr.startswith(url):
                     continue
 
@@ -92,6 +118,11 @@ class phishing_vector(AuditPlugin):
                 v.add_to_highlight(src_attr)
                 self.kb_append_uniq(self, 'phishing_vector', v)
                 break
+
+        msg = ('Performed HTTP response analysis at audit.phishing_vector URL %s,'
+               ' HTTP response ID %s.')
+        args = (response.get_uri(), response.id)
+        om.out.debug(msg % args)
 
     def get_long_desc(self):
         """

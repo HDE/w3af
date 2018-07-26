@@ -28,6 +28,7 @@ from w3af.core.data.db.disk_list import DiskList
 from w3af.core.data.kb.vuln import Vuln
 from w3af.core.controllers.plugins.grep_plugin import GrepPlugin
 from w3af.core.controllers.exceptions import BaseFrameworkException
+from w3af.core.controllers.core_helpers.fingerprint_404 import is_404
 
 
 CacheSettings = namedtuple('CacheSettings', ['type', 'value'])
@@ -63,7 +64,10 @@ class cache_control(GrepPlugin):
         
         elif response.body == '':
             return
-        
+
+        elif is_404(response):
+            return
+
         else:
             self._total_count += 1
     
@@ -137,16 +141,16 @@ class cache_control(GrepPlugin):
         # If none of the URLs implement protection, simply report
         # ONE vulnerability that says that.
         if self._total_count == self._vuln_count:
-            desc = 'The whole target web application has no protection (Pragma'\
-                   ' and Cache-Control headers) against sensitive content'\
-                   ' caching.'
+            desc = ('The whole target web application has no protection (Pragma'
+                    ' and Cache-Control headers) against sensitive content'
+                    ' caching.')
             
         # If most of the URLs implement the protection but some
         # don't, report ONE vulnerability saying: "Most are protected, but x, y
         # are not.
         if self._total_count > self._vuln_count:
-            desc = 'Some URLs have no protection (Pragma and Cache-Control'\
-                   ' headers) against sensitive content caching. Among them:\n'
+            desc = ('Some URLs have no protection (Pragma and Cache-Control'
+                    ' headers) against sensitive content caching. Among them:\n')
             desc += ' '.join([str(url) + '\n' for url in self._vulns])
         
         response_ids = [_id for _id in self._ids]

@@ -20,7 +20,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 """
 import re
 
-from w3af.core.controllers.ci.moth import get_moth_http
 from w3af.plugins.tests.helper import PluginTest, PluginConfig, MockResponse
 
 
@@ -38,8 +37,9 @@ class TestFoundAFD(PluginTest):
         }
     }
 
-    MOCK_RESPONSES = [MockResponse(target_url, 'PASS'),
-                      MockResponse(BAD_SIG_URI, 'FAIL')]
+    MOCK_RESPONSES = [MockResponse(target_url, 'Home page'),
+                      MockResponse(BAD_SIG_URI, 'Blocked by WAF'),
+                      MockResponse(re.compile(target_url + '.*'), 'Another page')]
 
     def test_afd_found_http(self):
         cfg = self._run_configs['cfg']
@@ -56,15 +56,22 @@ class TestFoundAFD(PluginTest):
         self.assertIn('../../../../etc/passwd', set(values), values)
 
 
-class TestFoundHttpsAFD(TestFoundAFD):
-    target_url = 'https://httpretty/'
+MOD_SECURITY_ANSWER = '''\
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+<html><head>
+<title>403 Forbidden</title>
+</head><body>
+<h1>Forbidden</h1>
+<p>You don't have permission to access /
+on this server.<br />
+</p>
+</body></html>
+'''
 
-    MOCK_RESPONSES = [MockResponse(target_url, 'PASS'),
-                      MockResponse(BAD_SIG_URI, 'FAIL')]
 
+class TestAFDShortResponses(PluginTest):
 
-class TestNotFoundAFD(PluginTest):
-    target_url = get_moth_http()
+    target_url = 'http://httpretty/'
 
     _run_configs = {
         'cfg': {
@@ -73,10 +80,50 @@ class TestNotFoundAFD(PluginTest):
         }
     }
 
-    def test_afd_not_found_http(self):
+    MOCK_RESPONSES = [MockResponse(target_url, 'hello world'),
+                      MockResponse(BAD_SIG_URI, MOD_SECURITY_ANSWER, status=403),
+                      MockResponse(re.compile(target_url + '\?.*'), 'hello world')]
+
+    def test_afd_found(self):
         cfg = self._run_configs['cfg']
         self._scan(self.target_url, cfg['plugins'])
 
         infos = self.kb.get('afd', 'afd')
 
+        self.assertEqual(len(infos), 1, infos)
+        info = infos[0]
+
+        self.assertEqual(info.get_name(), 'Active filter detected')
+        values = [u.url_string.split('=')[1] for u in info['filtered']]
+
+        self.assertIn('../../../../etc/passwd', set(values), values)
+
+
+class TestFoundHttpsAFD(TestFoundAFD):
+
+    target_url = 'https://httpretty/'
+
+    MOCK_RESPONSES = [MockResponse(target_url, 'Home page'),
+                      MockResponse(BAD_SIG_URI, 'Blocked by WAF'),
+                      MockResponse(re.compile(target_url + '.*'), 'Another page')]
+
+
+class TestNotFoundAFD(PluginTest):
+
+    target_url = 'http://httpretty/'
+
+    _run_configs = {
+        'cfg': {
+            'target': target_url,
+            'plugins': {'infrastructure': (PluginConfig('afd'),)}
+        }
+    }
+
+    MOCK_RESPONSES = [MockResponse(re.compile('.*'), 'Static page')]
+
+    def test_afd_not_found_http(self):
+        cfg = self._run_configs['cfg']
+        self._scan(self.target_url, cfg['plugins'])
+
+        infos = self.kb.get('afd', 'afd')
         self.assertEqual(len(infos), 0, infos)

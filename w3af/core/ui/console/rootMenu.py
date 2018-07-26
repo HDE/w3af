@@ -104,7 +104,7 @@ class rootMenu(menu):
             return
 
         try:
-            self.show_progress_on_request()
+            self.handle_keypress_during_scan()
         except KeyboardInterrupt:
             self.handle_scan_stop()
 
@@ -157,43 +157,68 @@ class rootMenu(menu):
             # https://github.com/andresriancho/w3af/issues/8114
             self._w3af.plugins.set_plugins(['console'], 'output')
 
-    def show_progress_on_request(self):
+    def handle_keypress_during_scan(self):
         """
         When the user hits enter, show the progress
         """
-        while self._w3af.status.is_running():
+        term.set_raw_input_mode(True)
 
-            # Define some variables...
-            user_press_enter = False
+        handlers = {'P': self._pause_scan,
+                    'R': self._resume_scan,
+                    '\r': self._show_status,
+                    '\n': self._show_status,
+                    '\x03': self._stop_scan}
 
-            # TODO: This if is terrible! I need to remove it!
-            # read from sys.stdin with a 0.5 second timeout
-            if sys.platform != 'win32':
-                # linux
+        try:
+            while self._w3af.status.is_running() or self._w3af.status.is_paused():
+
                 try:
-                    rfds, wfds, efds = select.select([sys.stdin], [], [], 0.5)
+                    read_ready, _, _ = select.select([sys.stdin], [], [], 0.5)
                 except select.error:
                     continue
-                else:
-                    if rfds:
-                        if len(sys.stdin.readline()):
-                            user_press_enter = True
-            else:
-                # windows
-                import msvcrt
-                time.sleep(0.3)
-                if msvcrt.kbhit():
-                    if term.read(1) in ['\n', '\r', '\r\n', '\n\r']:
-                        user_press_enter = True
 
-            # If something was written to sys.stdin, read it
-            if user_press_enter:
+                if not read_ready:
+                    continue
 
-                # Get the information and print it to the user
-                status_information_str = self._w3af.status.get_long_status()
-                t = table([(status_information_str,)])
-                t.draw()
-                om.out.console('')
+                pressed_key = sys.stdin.read(1)
+                handler = handlers.get(pressed_key, self._default_during_scan_handler)
+                handler()
+        finally:
+            term.set_raw_input_mode(False)
+
+    def _default_during_scan_handler(self):
+        om.out.console('Unknown key. The following commands are allowed during'
+                       ' the scan:\n\n'
+                       '  (P) pause the scan\n'
+                       '  (R) resume a paused scan\n'
+                       '  (enter) print scan status\n'
+                       '  (Ctrl+C) stop scan\n')
+
+    def _stop_scan(self):
+        raise KeyboardInterrupt
+
+    def _pause_scan(self):
+        if self._w3af.status.is_paused():
+            om.out.console('The scan is already paused.')
+            return
+
+        self._w3af.pause(True)
+        om.out.console('The scan was paused.')
+
+    def _resume_scan(self):
+        if not self._w3af.status.is_paused():
+            om.out.console('The scan is running. Can not resume.')
+            return
+
+        self._w3af.pause(False)
+        om.out.console('The scan was resumed.')
+
+    def _show_status(self):
+        # Get the information and print it to the console
+        status_information_str = self._w3af.status.get_long_status()
+        t = table([(status_information_str,)])
+        t.draw()
+        om.out.console('')
 
     def _cmd_version(self, params):
         """

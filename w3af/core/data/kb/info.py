@@ -24,6 +24,8 @@ import uuid
 
 from vulndb import DBVuln
 
+import w3af.core.data.kb.config as cf
+
 from w3af.core.data.constants.severity import INFORMATION
 from w3af.core.data.fuzzer.mutants.mutant import Mutant
 from w3af.core.data.fuzzer.mutants.empty_mutant import EmptyMutant
@@ -66,7 +68,6 @@ class Info(dict):
         self._plugin_name = None
         self._vulndb_id = None
         self._vulndb = None
-        self._uniq_id = str(uuid.uuid4())
 
         # Set the values provided by the user
         self.set_vulndb_id(vulndb_id)
@@ -74,7 +75,13 @@ class Info(dict):
         self.set_desc(desc)
         self.set_id(response_ids)
         self.set_plugin_name(plugin_name)
-    
+
+        self._uniq_id = None
+        self.generate_new_id()
+
+    def generate_new_id(self):
+        self._uniq_id = str(uuid.uuid4())
+
     @classmethod
     def from_mutant(cls, name, desc, response_ids, plugin_name, mutant):
         """
@@ -277,14 +284,21 @@ class Info(dict):
             self._vulndb_id = None
             return
 
-        if not DBVuln.is_valid_id(vulndb_id):
-            all_db_ids = DBVuln.get_all_db_ids()
+        if not DBVuln.is_valid_id(vulndb_id, language=self.get_vulndb_lang()):
+            all_db_ids = DBVuln.get_all_db_ids(language=self.get_vulndb_lang())
             msg = ('Invalid vulnerability DB id %s. There are %s entries in'
                    ' the vulnerability database but none is the specified one.')
             args = (vulndb_id, len(all_db_ids))
             raise ValueError(msg % args)
 
         self._vulndb_id = vulndb_id
+
+    def get_vulndb_lang(self):
+        """
+        :return: The language code (es, en, etc.) to use when reading from
+                 the vulnerability database.
+        """
+        return cf.cf.get('vulndb_language')
 
     def has_db_details(self):
         """
@@ -371,30 +385,33 @@ class Info(dict):
             return self._vulndb
 
         if self._vulndb_id is not None:
-            self._vulndb = DBVuln.from_id(self._vulndb_id)
+            self._vulndb = DBVuln.from_id(self._vulndb_id,
+                                          language=self.get_vulndb_lang())
             return self._vulndb
 
     def _get_desc_impl(self, what, with_id=True):
-        
-        if self._id is not None and self._id != 0 and with_id:
-            if self._desc[-1] != '\n' and not self._desc.strip().endswith('.'):
-                self._desc += '. '
-
-            # One request OR more than one request
-            desc_to_return = self._desc
-            if len(self._id) > 1:
-                id_range = self._convert_to_range_wrapper(self._id)
-                
-                desc_to_return += 'This %s was found in the requests' % what
-                desc_to_return += ' with ids %s.' % id_range
-
-            elif len(self._id) == 1:
-                desc_to_return += 'This %s was found in the request' % what
-                desc_to_return += ' with id %s.' % self._id[0]
-
-            return desc_to_return
-        else:
+        if not with_id:
             return self._desc
+
+        if not self._id:
+            return self._desc
+
+        if self._desc[-1] != '\n' and not self._desc.strip().endswith('.'):
+            self._desc += '. '
+
+        # One request OR more than one request
+        desc_to_return = self._desc
+        if len(self._id) > 1:
+            id_range = self._convert_to_range_wrapper(self._id)
+
+            desc_to_return += 'This %s was found in the requests' % what
+            desc_to_return += ' with ids %s.' % id_range
+
+        elif len(self._id) == 1:
+            desc_to_return += 'This %s was found in the request' % what
+            desc_to_return += ' with id %s.' % self._id[0]
+
+        return desc_to_return
 
     def set_plugin_name(self, plugin_name):
         self._plugin_name = plugin_name
@@ -432,23 +449,23 @@ class Info(dict):
             is_new_seq = (num != last + 1)
             if is_new_seq:  # End of sequence
                 if dist:  # multi-elems sequence
-                    res.append(_('%s to %s') % (first, last))
+                    res.append('%s to %s' % (first, last))
                 else:  # one-elem sequence
                     res.append(first)
                 if is_last_in_seq(num):
-                    res.append(_('and') + ' %s' % num)
+                    res.append('and' + ' %s' % num)
                     break
                 dist = 0
                 first = num
             else:
                 if is_last_in_seq(num):
-                    res.append(_('%s to %s') % (first, num))
+                    res.append('%s to %s' % (first, num))
                     break
                 dist += 1
             last = num
 
         res_str = ', '.join(str(ele) for ele in res)
-        return res_str.replace(', ' + _('and'), ' and')
+        return res_str.replace(', and', ' and')
 
     def __str__(self):
         return self._desc
@@ -502,17 +519,17 @@ class Info(dict):
             set_id( 3 )
 
         And we save this to the attribute:
-            [ 3, ]
+            [3,]
 
         When the info object is related to more than one request / response,
         we get this call:
             set_id( [3, 4] )
 
         And we save this to the attribute:
-            [ 3, 4]
+            [3, 4]
 
         Also, the list is sorted!
-            set_id( [4, 3] )
+            set_id([4, 3])
 
         Will save:
             [3, 4]

@@ -25,6 +25,8 @@ import threading
 import cPickle
 import copy
 
+import w3af.core.controllers.output_manager as om
+
 from w3af.core.data.fuzzer.utils import rand_alpha
 from w3af.core.data.db.dbms import get_default_persistent_db_instance
 from w3af.core.controllers.exceptions import DBException
@@ -62,6 +64,12 @@ class BasicKnowledgeBase(object):
         vulnerability in the same location for the same URL and parameter.
 
         Does this in a thread-safe manner.
+
+        :param location_a: The A location where to store data
+
+        :param location_b: The B location where to store data
+
+        :param info_inst: An Info instance (or subclasses like Vuln and InfoSet)
 
         :param filter_by: One of 'VAR' of 'URL'. Only append to the kb in
                           (location_a, location_b) if there is NO OTHER info
@@ -103,23 +111,40 @@ class BasicKnowledgeBase(object):
     def filter_var(self, location_a, location_b, info_inst):
         """
         :return: True if there is no other info in (location_a, location_b)
-                 with the same URL,Variable,DataContainer.keys() as the
-                 info_inst.
+                 with the same URL, variable as the info_inst.
+
+                 Before I checked the data container parameter names
+                 the problem with that approach was that in some rare
+                 cases the scanner reported vulnerabilities in:
+
+                    http://target.com/?id={here}&tracking1=23
+                    http://target.com/?id={here}&tracking1=23&tracking2=42
+
+                 Where tracking1 and tracking2 were parameters added
+                 for tracking the user navigation through the site.
+
+                 Then I realized that this is the same vulnerability
+                 since the same piece of code is the one generating
+                 them. Thus, no need to report them twice.
+
         """
         for saved_vuln in self.get(location_a, location_b):
 
-            if saved_vuln.get_token_name() == info_inst.get_token_name() and\
-            saved_vuln.get_url() == info_inst.get_url():
+            if saved_vuln.get_token_name() != info_inst.get_token_name():
+                continue
 
-                if saved_vuln.get_dc() is None and\
-                info_inst.get_dc() is None:
-                    return False
+            if saved_vuln.get_url() != info_inst.get_url():
+                continue
 
-                if saved_vuln.get_dc() is not None and\
-                info_inst.get_dc() is not None:
+            msg = ('[filter_var] Is preventing "%s" from being written to the'
+                   ' KB because "%s" has the same token (%s) and URL (%s).')
+            args = (info_inst.get_desc(),
+                    saved_vuln.get_desc(),
+                    info_inst.get_token_name(),
+                    info_inst.get_url())
+            om.out.debug(msg % args)
 
-                    if saved_vuln.get_dc().keys() == info_inst.get_dc().keys():
-                        return False
+            return False
 
         return True
 
@@ -156,8 +181,20 @@ class BasicKnowledgeBase(object):
 
                 if info_set.match(info_inst):
                     old_info_set = copy.deepcopy(info_set)
-                    info_set.add(info_inst)
+
+                    # Add the new information to the InfoSet instance, keep in
+                    # mind that InfoSet.MAX_INFO_INSTANCES will be enforced and
+                    # after it, no more Info instances are added to the InfoSet
+                    added = info_set.add(info_inst)
+
+                    # Only change the ID of the InfoSet instance if a new Info
+                    # has been added
+                    if added:
+                        info_set.generate_new_id()
+
+                    # Save to the DB
                     self.update(old_info_set, info_set)
+
                     return info_set, False
             else:
                 # No pre-existing InfoSet instance matched, let's create one
@@ -179,11 +216,39 @@ class BasicKnowledgeBase(object):
         """
         raise NotImplementedError
 
-    def get_all_findings(self):
+    def get_all_entries_of_class_iter(self, klass, exclude_ids=()):
+        """
+        :yield: All objects where class in klass that are saved in the kb.
+        :param exclude_ids: The vulnerability IDs to exclude from the result
+        """
+        raise NotImplementedError
+
+    def get_all_findings(self, exclude_ids=()):
         """
         :return: A list of all findings, including Info, Vuln and InfoSet.
+        :param exclude_ids: The vulnerability IDs to exclude from the result
         """
-        return self.get_all_entries_of_class((Info, InfoSet, Vuln))
+        return self.get_all_entries_of_class((Info, InfoSet, Vuln),
+                                             exclude_ids=exclude_ids)
+
+    def get_all_findings_iter(self, exclude_ids=()):
+        """
+        An iterated version of get_all_findings. All new code should use
+        get_all_findings_iter instead of get_all_findings().
+
+        :yield: All findings stored in the KB.
+        :param exclude_ids: The vulnerability IDs to exclude from the result
+        """
+        klass = (Info, InfoSet, Vuln)
+
+        for finding in self.get_all_entries_of_class_iter(klass, exclude_ids):
+            yield finding
+
+    def get_all_uniq_ids_iter(self):
+        """
+        :yield: All uniq IDs from the KB
+        """
+        raise NotImplementedError
 
     def get_all_shells(self, w3af_core=None):
         """
@@ -231,10 +296,11 @@ class BasicKnowledgeBase(object):
         """
         raise NotImplementedError
 
-    def get_all_entries_of_class(self, klass):
+    def get_all_entries_of_class(self, klass, exclude_ids=()):
         """
         :return: A list of all objects of class == klass that are saved in the
                  kb.
+        :param exclude_ids: The vulnerability IDs to exclude from the result
         """
         raise NotImplementedError
 
@@ -394,12 +460,12 @@ class DBKnowledgeBase(BasicKnowledgeBase):
     def _get_uniq_id(self, obj):
         if isinstance(obj, (Info, InfoSet)):
             return obj.get_uniq_id()
-        else:
-            if isinstance(obj, collections.Iterable):
-                concat_all = ''.join([str(hash(i)) for i in obj])
-                return str(hash(concat_all))
-            else:
-                return str(hash(obj))
+
+        if isinstance(obj, collections.Iterable):
+            concat_all = ''.join([str(hash(i)) for i in obj])
+            return str(hash(concat_all))
+
+        return str(hash(obj))
 
     @requires_setup
     def append(self, location_a, location_b, value, ignore_type=False):
@@ -419,7 +485,10 @@ class DBKnowledgeBase(BasicKnowledgeBase):
 
         query = "INSERT INTO %s VALUES (?, ?, ?, ?)" % self.table_name
         self.db.execute(query, t)
-        self._notify_observers(self.APPEND, location_a, location_b, value,
+        self._notify_observers(self.APPEND,
+                               location_a,
+                               location_b,
+                               value,
                                ignore_type=ignore_type)
 
     @requires_setup
@@ -473,6 +542,27 @@ class DBKnowledgeBase(BasicKnowledgeBase):
             result = cPickle.loads(result[0])
 
         return result
+
+    @requires_setup
+    def get_all_uniq_ids_iter(self, include_ids=()):
+        """
+        :param include_ids: If specified, only include these IDs.
+        :yield: All uniq IDs from the KB
+        """
+        if include_ids:
+            bindings = ['?'] * len(include_ids)
+            bindings = ','.join(bindings)
+            query = 'SELECT uniq_id FROM %s WHERE uniq_id IN (%s)'
+            query %= (self.table_name, bindings)
+
+            result = self.db.select(query, parameters=include_ids)
+
+        else:
+            query = 'SELECT uniq_id FROM %s'
+            result = self.db.select(query % self.table_name)
+
+        for uniq_id, in result:
+            yield uniq_id
 
     @requires_setup
     def update(self, old_info, update_info):
@@ -534,22 +624,34 @@ class DBKnowledgeBase(BasicKnowledgeBase):
             functor(*args, **kwargs)
 
     @requires_setup
-    def get_all_entries_of_class(self, klass):
+    def get_all_entries_of_class(self, klass, exclude_ids=()):
         """
-        :return: A list of all objects of class == klass that are saved in the
+        :return: A list of all objects where class in klass that are saved in the
                  kb.
         """
-        query = 'SELECT pickle FROM %s'
-        results = self.db.select(query % self.table_name)
-
         result_lst = []
 
-        for r in results:
-            obj = cPickle.loads(r[0])
-            if isinstance(obj, klass):
-                result_lst.append(obj)
+        for entry in self.get_all_entries_of_class_iter(klass, exclude_ids=exclude_ids):
+            result_lst.append(entry)
 
         return result_lst
+
+    @requires_setup
+    def get_all_entries_of_class_iter(self, klass, exclude_ids=()):
+        """
+        :yield: All objects where class in klass that are saved in the kb.
+        """
+        bindings = ['?'] * len(exclude_ids)
+        bindings = ','.join(bindings)
+        query = 'SELECT uniq_id, pickle FROM %s WHERE uniq_id NOT IN (%s)'
+        query %= (self.table_name, bindings)
+
+        results = self.db.select(query, parameters=exclude_ids)
+
+        for uniq_id, serialized_obj, in results:
+            obj = cPickle.loads(serialized_obj)
+            if isinstance(obj, klass):
+                yield obj
 
     @requires_setup
     def get_all_vulns(self):
@@ -674,8 +776,5 @@ class DBKnowledgeBase(BasicKnowledgeBase):
         return self.fuzzable_requests.add(fuzzable_request)
 
 
-
-
 KnowledgeBase = DBKnowledgeBase
-
 kb = KnowledgeBase()

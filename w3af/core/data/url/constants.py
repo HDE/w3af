@@ -21,7 +21,7 @@ USER_AGENT = ('Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1;'
 
 # The error rate is multiplied by SOCKET_ERROR_DELAY to get the real delay time
 # in seconds.
-SOCKET_ERROR_DELAY = 0.15
+SOCKET_ERROR_DELAY = 0.2
 
 # We want to pause on errors in order to allow the remote end to recover if
 # we're flooding it, but some errors are allowed
@@ -35,14 +35,18 @@ ERROR_DELAY_LIMIT = 5
 # timeouts we actually need *some* timeout to start from, this is the value:
 DEFAULT_TIMEOUT = 6
 
-# Run the timeout adjustment every N HTTP requests
-TIMEOUT_ADJUST_LIMIT = 50
+# Max timeout that can be set by the framework's socket timeout auto-adjust
+# feature. This will stop scans that are run on *very* slow applications instead
+# of just trying to scan them at awfully slow speeds
+MAX_TIMEOUT = 60
 
-# Used to calculate the timeout based on the average response time from the
-# remote site. timeout = average_response_time * TIMEOUT_MULT_CONST
-# https://github.com/andresriancho/w3af/issues/8698
-TIMEOUT_MULT_CONST = 7.5
-
+# Min timeout that can be set for a socket connection.
+#
+# Anything lower than this will most likely cause unnecessary HTTP timeouts
+# when the server has a temporary performance issue: site always answers in
+# 0.3 seconds but the instance handling our request is running a report in
+# another thread and answered in 2.1 seconds
+#
 # In some cases the remote server is really quick to respond and we would be
 # able to set timeouts as low as 0.01 seconds, while this is awesome it also
 # means that any "small" load on our scanner and/or the server side will trigger
@@ -54,4 +58,22 @@ TIMEOUT_MULT_CONST = 7.5
 # care by TIMEOUT_MULT_CONST but in some cases that's not enough.
 #
 # Thus I've decided to set a MIN timeout:
-TIMEOUT_MIN = 0.35
+MIN_TIMEOUT = 3
+
+# Run the timeout adjustment every N HTTP requests
+TIMEOUT_ADJUST_LIMIT = 15
+
+# Used to calculate the timeout based on the average response time from the
+# remote site:
+#
+#   timeout = average_response_time * TIMEOUT_MULT_CONST
+#
+# https://github.com/andresriancho/w3af/issues/8698
+TIMEOUT_MULT_CONST = 7.5
+
+# How much to increase the timeout setting after a timeout error has happen
+TIMEOUT_INCREASE_MULT = 1.1
+
+# It doesn't make sense to update the timeout 3 times per second. So we
+# require at least this time to happen between adjustments:
+TIMEOUT_UPDATE_ELAPSED_MIN = 3.0

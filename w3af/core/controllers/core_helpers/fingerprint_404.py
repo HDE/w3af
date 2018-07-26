@@ -21,9 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 """
 from __future__ import with_statement
 
-import cgi
 import thread
-import urllib
 import string
 
 from collections import namedtuple
@@ -148,8 +146,15 @@ class fingerprint_404(object):
 
         test_urls = []
 
-        for extension in handlers:
-            rand_alnum_file = rand_alnum(8) + '.' + extension
+        for handler_ext in handlers:
+            rand_alnum_file = rand_alnum(8) + '.' + handler_ext
+            url404 = domain_path.url_join(rand_alnum_file)
+            test_urls.append(url404)
+
+        # Also keep in mind that in some cases we don't have an extension, so
+        # we need to create a URL with just a filename
+        if not extension:
+            rand_alnum_file = rand_alnum(8)
             url404 = domain_path.url_join(rand_alnum_file)
             test_urls.append(url404)
 
@@ -159,6 +164,20 @@ class fingerprint_404(object):
         for not_exist_resp in imap_unordered(self._send_404, test_urls):
             four_oh_data = FourOhFourResponseFactory(not_exist_resp)
             not_exist_resp_lst.append(four_oh_data)
+
+            #
+            # Populate the self._directory_uses_404_codes with the information
+            # we just retrieved from the application
+            #
+            if not_exist_resp.get_code() == 404:
+
+                url_404 = not_exist_resp.get_uri()
+
+                path_extension = (url_404.get_domain_path(),
+                                  url_404.get_extension())
+
+                if path_extension not in self._directory_uses_404_codes:
+                    self._directory_uses_404_codes.add(path_extension)
 
         #
         # I have the 404 responses in not_exist_resp_lst, but maybe they
@@ -176,7 +195,7 @@ class fingerprint_404(object):
             for j in self._404_responses:
 
                 if i is j:
-                    continue
+                    break
 
                 if fuzzy_equal(i.body, j.body, IS_EQUAL_RATIO):
                     # i already exists in the self._404_responses, no need
@@ -259,22 +278,22 @@ class fingerprint_404(object):
             return True
 
         #
-        #    Simple, if the file we requested is in a directory that's known to
-        #    return 404 codes for files that do not exist, AND this is NOT a 404
-        #    then we're return False!
-        #
-        path_extension = (domain_path, extension)
-        if path_extension in self._directory_uses_404_codes and \
-        http_response.get_code() != 404:
-            return False
-
-        #
         #   Lets start with the rather complex code...
         #
         with self._lock:
             if not self._already_analyzed:
                 self.generate_404_knowledge(http_response.get_url())
                 self._already_analyzed = True
+
+        #
+        #    Simple, if the file we requested is in a directory that's known to
+        #    return 404 codes for files that do not exist, AND this is NOT a 404
+        #    then we're return False!
+        #
+        path_extension = (domain_path, extension)
+        if path_extension in self._directory_uses_404_codes:
+            if http_response.get_code() != 404:
+                return False
 
         # 404_body was already cleaned inside generate_404_knowledge
         # so we need to clean this one in order to have a fair comparison
@@ -344,7 +363,7 @@ class fingerprint_404(object):
                 four_oh_data = FourOhFourResponseFactory(http_response)
                 self._404_responses.append(four_oh_data)
 
-                msg = ('"%s" (id:%s) is a 404 (similarity_index > %s).'
+                msg = ('"%s" (id:%s) is a 404 [similarity_index > %s].'
                        ' Adding new knowledge to the 404_responses database'
                        ' (length=%s).')
                 fmt = (http_response.get_url(), http_response.id,
@@ -375,6 +394,14 @@ class fingerprint_404(object):
                 'a1a2'      ==> 'c3c4"
                 'a1a2.html' ==> 'c3c4.html"
 
+            * There is an edge case which was reported in [0] which affects
+            files like '.ssh' or '.env'. These files (at least from w3af's
+            perspective) don't have a name and have an extension. When we
+            find a file like this we'll just randomize the filename and
+            keep the extension.
+
+        [0] https://github.com/andresriancho/w3af/issues/17092
+
         :param filename: The original filename
         :return: A mutated filename
         """
@@ -384,6 +411,13 @@ class fingerprint_404(object):
         else:
             extension = None
             orig_filename = split_filename[0]
+
+        #
+        #   This handles the case of files which don't have a name,
+        #   such as .env.
+        #
+        if not orig_filename:
+            return u'%s.%s' % (rand_alnum(5), extension)
 
         def grouper(iterable, n, fillvalue=None):
             """
@@ -443,7 +477,7 @@ class fingerprint_404(object):
         """
         Performs a very simple check to verify if this response is a 404 or not.
 
-        It takes the original URL and modifies it by pre-pending a "not-" to the
+        It takes the original URL and modifies it by flipping some bytes in the
         filename, then performs a request to that URL and compares the original
         response with the modified one. If they are equal then the original
         request is a 404.
@@ -456,6 +490,7 @@ class fingerprint_404(object):
         """
         response_url = http_response.get_url()
         filename = response_url.get_file_name()
+
         if not filename:
             relative_url = '../%s/' % rand_alnum(8)
             url_404 = response_url.url_join(relative_url)
@@ -467,14 +502,15 @@ class fingerprint_404(object):
         response_404 = self._send_404(url_404)
         clean_response_404_body = get_clean_body(response_404)
 
-        path_extension = (url_404.get_domain_path(),
-                          url_404.get_extension())
+        if response_404.get_code() == 404:
+            path_extension = (url_404.get_domain_path(),
+                              url_404.get_extension())
 
-        if response_404.get_code() == 404 and \
-        path_extension not in self._directory_uses_404_codes:
-            self._directory_uses_404_codes.add(path_extension)
+            if path_extension not in self._directory_uses_404_codes:
+                self._directory_uses_404_codes.add(path_extension)
 
-        return fuzzy_equal(clean_response_404_body, clean_resp_body,
+        return fuzzy_equal(clean_response_404_body,
+                           clean_resp_body,
                            IS_EQUAL_RATIO)
 
 

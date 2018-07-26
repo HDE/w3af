@@ -21,8 +21,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 """
 from __future__ import with_statement, print_function
 
-import sys
 import os
+import sys
 import sqlite3
 
 from functools import wraps
@@ -65,7 +65,10 @@ def verify_started(meth):
     @wraps(meth)
     def inner_verify_started(self, *args, **kwds):
         msg = 'No calls to SQLiteDBMS can be made after stop().'
+
+        assert not self.sql_executor.get_received_poison_pill(), msg
         assert self.sql_executor.is_alive(), msg
+
         return meth(self, *args, **kwds)
     
     return inner_verify_started
@@ -88,8 +91,31 @@ class SQLiteDBMS(object):
                  cache_size=2000):
 
         super(SQLiteDBMS, self).__init__()
-        
-        in_queue = Queue(100)
+
+        #
+        #   All DB queries from w3af are sent to this queue, and this is a lot
+        #   since the DiskList, DiskQueue, DiskDict classes which are used
+        #   extensively through the framework use the same SQLite db as a
+        #   backend (of course different tables, but the same SQLite file and
+        #   on-memory instance).
+        #
+        #   Limiting the size of this Queue is serious business. I can't think
+        #   about a scenario where this limit would create a thread-lock, but
+        #   it doesn't feel right...
+        #
+        #   I've added debugging to the SQLiteExecutor.run() method to
+        #   analyze when the queue is full. After just a couple of minutes of
+        #   running the following message is shown:
+        #
+        #   The SQLiteExecutor.in_queue length is 0. Processed 14500 queries.
+        #
+        #   The queue size is 0, and other messages keep showing that same
+        #   number, or other <10, and the processed queries is really high but
+        #   acceptable: SQLite is C, fast, etc.
+        #
+        #   Any dead-lock you might be looking for doesn't seem to be here.
+        #
+        in_queue = Queue(250)
         self.sql_executor = SQLiteExecutor(in_queue)
         self.sql_executor.start()
         
@@ -105,7 +131,7 @@ class SQLiteDBMS(object):
         
         self.filename = filename
         self.autocommit = autocommit
-    
+
     @verify_started
     def execute(self, query, parameters=(), commit=False):
         """
@@ -115,7 +141,7 @@ class SQLiteDBMS(object):
         fr = self.sql_executor.query(query, parameters)
         
         if self.autocommit or commit:
-            self.sql_executor.commit()
+            self.commit()
             
         return fr
 
@@ -140,12 +166,24 @@ class SQLiteDBMS(object):
 
     @verify_started
     def commit(self):
-        self.sql_executor.commit()
+        # Send the task and wait for the execution
+        future = self.sql_executor.commit()
+        future.result()
 
     @verify_started
     def close(self):
+        # Commit all pending changes
         self.commit()
-        self.sql_executor.stop()
+
+        # Setting the received poison pill to True will make all calls to
+        # SQLiteDBMS methods fail because of `@verify_started`. The goal is
+        # to prevent other tasks being queued after the poison pill
+        self.sql_executor.set_received_poison_pill(True)
+
+        # And then send the poison pill and wait for it to be processed by
+        # the run() method
+        future = self.sql_executor.stop()
+        future.result()
 
     def get_file_name(self):
         """Return DB filename."""
@@ -171,7 +209,10 @@ class SQLiteDBMS(object):
         
         if not columns:
             raise ValueError('create_table requires column names and types')
-        
+
+        if not isinstance(columns, list):
+            raise ValueError('create_table requires column names and types in a list')
+
         # Create the table
         query = 'CREATE TABLE %s (' % name
         
@@ -191,8 +232,8 @@ class SQLiteDBMS(object):
         return self.execute(query, commit=True)
 
     def table_exists(self, name):
-        query = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"\
-                " LIMIT 1"
+        query = ("SELECT name FROM sqlite_master WHERE type='table'"
+                 " AND name=? LIMIT 1")
         r = self.select(query, (name,))
         return bool(r)        
 
@@ -215,6 +256,7 @@ class SQLiteExecutor(Process):
     different thread.
     """
     DEBUG = False
+    REPORT_QSIZE_EVERY_N_CALLS = 250
     
     def __init__(self, in_queue):
         super(SQLiteExecutor, self).__init__(name='SQLiteExecutor')
@@ -225,6 +267,30 @@ class SQLiteExecutor(Process):
         self.name = 'SQLiteExecutor'
         
         self._in_queue = in_queue
+        self._last_reported_qsize = None
+        self._current_query_num = 0
+        self._poison_pill_received = False
+
+    def get_received_poison_pill(self):
+        return self._poison_pill_received
+
+    def set_received_poison_pill(self, received):
+        self._poison_pill_received = received
+
+    def _report_qsize(self):
+        """
+        Reports the in queue size every N seconds according to REPORT_QSIZE_EVERY_N_CALLS
+        """
+        if self._last_reported_qsize is None:
+            self._last_reported_qsize = 0
+            return
+
+        diff = self._current_query_num - self._last_reported_qsize
+        if diff % self.REPORT_QSIZE_EVERY_N_CALLS == 0:
+            self._last_reported_qsize = self._current_query_num
+
+            msg = 'The SQLiteExecutor.in_queue length is %s. Processed %s queries.'
+            print(msg % (self._in_queue.qsize(), self._current_query_num))
 
     def query(self, query, parameters):
         future = Future()
@@ -233,7 +299,8 @@ class SQLiteExecutor(Process):
         return future
     
     def _query_handler(self, query, parameters):
-        return self.cursor.execute(query, parameters)
+        cursor = self.conn.cursor()
+        return cursor.execute(query, parameters)
 
     def select(self, query, parameters):
         future = Future()
@@ -319,7 +386,7 @@ class SQLiteExecutor(Process):
         # to reduce (not to zero, but reduce) these issues.
         #
         #self.cursor.execute('PRAGMA synchronous=OFF')
-    
+
     def run(self):
         """
         This is the "main" method for this class, the one that
@@ -342,51 +409,55 @@ class SQLiteExecutor(Process):
         
         while True:
             op_code, args, kwds, future = self._in_queue.get()
-            
+
+            self._current_query_num += 1
+
             args = args or ()
             kwds = kwds or {}
             
             if self.DEBUG:
-                print('%s %s %s' % (op_code, args, kwds))
+                self._report_qsize()
+                #print('%s %s %s' % (op_code, args, kwds))
             
             handler = OP_CODES.get(op_code, None)
-            
+
+            if not future.set_running_or_notify_cancel():
+                return
+
             if handler is None:
                 # Invalid OPCODE
+                future.set_result(False)
                 continue
             
-            elif handler == POISON:
+            if handler == POISON:
+                self._poison_pill_received = True
+                future.set_result(True)
                 break
-             
-            else:
-                
-                if not future.set_running_or_notify_cancel():
-                    return
-                                    
-                try:
-                    result = handler(*args, **kwds)
-                except sqlite3.OperationalError, e:
-                    # I don't like this string match, but it seems that the
-                    # exception doesn't have any error code to match
-                    if 'no such table' in str(e):
-                        dbe = NoSuchTableException(str(e))
 
-                    elif 'malformed' in str(e):
-                        print(DB_MALFORMED_ERROR)
-                        dbe = MalformedDBException(DB_MALFORMED_ERROR)
+            try:
+                result = handler(*args, **kwds)
+            except sqlite3.OperationalError, e:
+                # I don't like this string match, but it seems that the
+                # exception doesn't have any error code to match
+                if 'no such table' in str(e):
+                    dbe = NoSuchTableException(str(e))
 
-                    else:
-                        # More specific exceptions to be added here later...
-                        dbe = DBException(str(e))
-
-                    future.set_exception(dbe)
-
-                except Exception, e:
-                    dbe = DBException(str(e))
-                    future.set_exception(dbe)
+                elif 'malformed' in str(e):
+                    print(DB_MALFORMED_ERROR)
+                    dbe = MalformedDBException(DB_MALFORMED_ERROR)
 
                 else:
-                    future.set_result(result)
+                    # More specific exceptions to be added here later...
+                    dbe = DBException(str(e))
+
+                future.set_exception(dbe)
+
+            except Exception, e:
+                dbe = DBException(str(e))
+                future.set_exception(dbe)
+
+            else:
+                future.set_result(result)
 
 
 temp_default_db = None

@@ -147,7 +147,7 @@ class TestKnowledgeBase(unittest.TestCase):
         kb.append_uniq('a', 'b', i2)
         self.assertEqual(kb.get('a', 'b'), [i1, ])
         
-    def test_append_uniq_var_not_uniq(self):
+    def test_append_uniq_var_not_uniq_diff_url(self):
         i1 = MockInfo()
         i1.set_uri(URL('http://moth/abc.html?id=1'))
         i1.set_dc(QueryString([('id', ['1'])]))
@@ -162,6 +162,63 @@ class TestKnowledgeBase(unittest.TestCase):
         kb.append_uniq('a', 'b', i2)
         self.assertEqual(kb.get('a', 'b'), [i1, i2])
 
+    def test_append_uniq_var_not_uniq_diff_token_name(self):
+        i1 = MockInfo()
+        i1.set_uri(URL('http://moth/abc.html?id=1&foo=bar'))
+        i1.set_dc(QueryString([('id', ['1']),
+                               ('foo', ['bar'])]))
+        i1.set_token(('id', 0))
+
+        i2 = MockInfo()
+        i2.set_uri(URL('http://moth/abc.html?id=1&foo=bar'))
+        i2.set_dc(QueryString([('id', ['3']),
+                               ('foo', ['bar'])]))
+        i2.set_token(('foo', 0))
+
+        kb.append_uniq('a', 'b', i1)
+        kb.append_uniq('a', 'b', i2)
+        self.assertEqual(kb.get('a', 'b'), [i1, i2])
+
+    def test_append_uniq_var_not_uniq_diff_token_name_three(self):
+        i1 = MockInfo()
+        i1.set_uri(URL('http://moth/abc.html?id=1&foo=bar'))
+        i1.set_dc(QueryString([('id', ['1']),
+                               ('foo', ['bar'])]))
+        i1.set_token(('id', 0))
+
+        i2 = MockInfo()
+        i2.set_uri(URL('http://moth/abc.html?id=1&foo=bar'))
+        i2.set_dc(QueryString([('id', ['3']),
+                               ('foo', ['bar'])]))
+        i2.set_token(('foo', 0))
+
+        # This instance duplicates i2
+        i3 = MockInfo()
+        i3.set_uri(URL('http://moth/abc.html?id=1&foo=bar'))
+        i3.set_dc(QueryString([('id', ['3']),
+                               ('foo', ['bar'])]))
+        i3.set_token(('foo', 0))
+
+        kb.append_uniq('a', 'b', i1)
+        kb.append_uniq('a', 'b', i2)
+        kb.append_uniq('a', 'b', i3)
+        self.assertEqual(kb.get('a', 'b'), [i1, i2])
+
+    def test_append_uniq_var_diff_params(self):
+        i1 = MockInfo()
+        i1.set_uri(URL('http://moth/abc.html?id=1'))
+        i1.set_dc(QueryString([('id', ['1'])]))
+        i1.set_token(('id', 0))
+
+        i2 = MockInfo()
+        i2.set_uri(URL('http://moth/abc.html?id=3&foo=bar'))
+        i2.set_dc(QueryString([('id', ['3']), ('foo', ['bar'])]))
+        i2.set_token(('id', 0))
+
+        kb.append_uniq('a', 'b', i1)
+        kb.append_uniq('a', 'b', i2)
+        self.assertEqual(kb.get('a', 'b'), [i1])
+
     def test_append_uniq_url_uniq(self):
         i1 = MockInfo()
         i1.set_uri(URL('http://moth/abc.html?id=1'))
@@ -175,7 +232,7 @@ class TestKnowledgeBase(unittest.TestCase):
 
         kb.append_uniq('a', 'b', i1, filter_by='URL')
         kb.append_uniq('a', 'b', i2, filter_by='URL')
-        self.assertEqual(kb.get('a', 'b'), [i1,])
+        self.assertEqual(kb.get('a', 'b'), [i1])
 
     def test_append_uniq_url_different(self):
         i1 = MockInfo()
@@ -223,6 +280,30 @@ class TestKnowledgeBase(unittest.TestCase):
         kb.raw_write('a', 'b', 'abc')
         self.assertEqual(kb.get_all_entries_of_class(str), ['abc'])
 
+    def test_get_all_uniq_ids_iter(self):
+        i1 = MockInfo()
+        kb.append('a', 'b', i1)
+
+        uniq_ids = [u for u in kb.get_all_uniq_ids_iter()]
+
+        self.assertEqual(uniq_ids, [i1.get_uniq_id()])
+
+    def test_get_all_uniq_ids_iter_include_ids(self):
+        i1 = MockInfo()
+        kb.append('a', 'b', i1)
+
+        uniq_ids = [u for u in kb.get_all_uniq_ids_iter(include_ids=[i1.get_uniq_id()])]
+
+        self.assertEqual(uniq_ids, [i1.get_uniq_id()])
+
+    def test_get_all_uniq_ids_iter_include_ids_false(self):
+        i1 = MockInfo()
+        kb.append('a', 'b', i1)
+
+        uniq_ids = [u for u in kb.get_all_uniq_ids_iter(include_ids=[str(uuid.uuid4())])]
+
+        self.assertEqual(uniq_ids, [])
+
     def test_all_of_info_vuln(self):
         i1 = MockInfo()
         i2 = MockInfo()
@@ -241,6 +322,29 @@ class TestKnowledgeBase(unittest.TestCase):
         self.assertEqual(kb.get_all_vulns(), [v1, vset])
         self.assertEqual(kb.get_all_infos(), [i1, iset])
         self.assertEqual(kb.get_all_findings(), [i1, iset, v1, vset])
+
+    def test_all_of_info_exclude_ids(self):
+        i1 = MockInfo()
+        i2 = MockInfo()
+
+        v1 = MockVuln()
+        v2 = MockVuln()
+
+        iset = InfoSet([i2])
+        vset = InfoSet([v2])
+
+        kb.append('a', 'b', i1)
+        kb.append('w', 'z', iset)
+        kb.append('x', 'y', v1)
+        kb.append('4', '2', vset)
+
+        all_findings = kb.get_all_findings()
+        all_findings_except_v1 = kb.get_all_findings(exclude_ids=(v1.get_uniq_id(),))
+        all_findings_except_v1_v2 = kb.get_all_findings(exclude_ids=(v1.get_uniq_id(), vset.get_uniq_id()))
+
+        self.assertEqual(all_findings, [i1, iset, v1, vset])
+        self.assertEqual(all_findings_except_v1, [i1, iset, vset])
+        self.assertEqual(all_findings_except_v1_v2, [i1, iset])
 
     def test_dump_empty(self):
         empty = kb.dump()
@@ -713,6 +817,85 @@ class TestKnowledgeBase(unittest.TestCase):
         self.assertFalse(created)
         self.assertIsInstance(info_set, InfoSet)
         self.assertEqual(len(info_set.infos), 2)
+
+    def test_multiple_append_uniq_group(self):
+        def multi_append():
+            for i in xrange(InfoSet.MAX_INFO_INSTANCES * 2):
+                vuln = MockVuln()
+                kb.append_uniq_group('a', 'b', vuln, group_klass=MockInfoSetTrue)
+
+            info_set_list = kb.get('a', 'b')
+
+            self.assertEqual(len(info_set_list), 1)
+
+            info_set = info_set_list[0]
+            self.assertEqual(len(info_set.infos), InfoSet.MAX_INFO_INSTANCES)
+            return True
+
+        pool = Pool(2)
+
+        r1 = pool.apply_async(multi_append)
+        r2 = pool.apply_async(multi_append)
+        r3 = pool.apply_async(multi_append)
+
+        self.assertTrue(r1.get())
+        self.assertTrue(r2.get())
+        self.assertTrue(r3.get())
+
+        pool.terminate()
+        pool.join()
+
+    def test_info_set_keep_uniq_id(self):
+        #
+        # Create a new InfoSet, load it from the KB, confirm that it has
+        # the same uniq_id
+        #
+        vuln = MockVuln(name='Foos')
+
+        info_set_a, created = kb.append_uniq_group('a', 'b', vuln,
+                                                   group_klass=MockInfoSetNames)
+
+        self.assertTrue(created)
+
+        info_set_b = kb.get('a', 'b')[0]
+
+        self.assertEqual(info_set_a.get_uniq_id(),
+                         info_set_b.get_uniq_id())
+
+        #
+        # Change the InfoSet a little bit by adding a new Info. That should
+        # change the uniq_id
+        #
+        vuln = MockVuln(name='Foos')
+        _, created = kb.append_uniq_group('a', 'b', vuln,
+                                          group_klass=MockInfoSetNames)
+
+        self.assertFalse(created)
+
+        info_set_b = kb.get('a', 'b')[0]
+
+        self.assertNotEqual(info_set_a.get_uniq_id(),
+                            info_set_b.get_uniq_id())
+
+    def test_info_set_keep_uniq_id_after_max_info_instances(self):
+        #
+        # Create one InfoSet, add MAX_INFO_INSTANCES, assert that the ID is not
+        # changed afterwards
+        #
+        vuln = MockVuln(name='Foos')
+
+        for _ in xrange(MockInfoSetNames.MAX_INFO_INSTANCES + 1):
+            kb.append_uniq_group('a', 'b', vuln, group_klass=MockInfoSetNames)
+
+        info_set_before = kb.get('a', 'b')[0]
+
+        # Now some rounds of testing
+        for _ in xrange(5):
+            info_set_after, _ = kb.append_uniq_group('a', 'b', vuln,
+                                                     group_klass=MockInfoSetNames)
+
+            self.assertEqual(info_set_before.get_uniq_id(),
+                             info_set_after.get_uniq_id())
 
     def test_append_uniq_group_no_match_filter_func(self):
         vuln1 = MockVuln(name='Foos')

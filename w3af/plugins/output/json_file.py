@@ -36,6 +36,7 @@ from w3af.core.data.options.option_list import OptionList
 
 TIME_FORMAT = '%a %b %d %H:%M:%S %Y'
 
+
 class json_file(OutputPlugin):
     """
     Export identified vulnerabilities to a JSON file.
@@ -58,7 +59,7 @@ class json_file(OutputPlugin):
         pass
 
     debug = log_http = vulnerability = do_nothing
-    information = error = console = log_enabled_plugins = do_nothing
+    information = error = console = do_nothing
 
     def end(self):
         self.flush()
@@ -73,7 +74,6 @@ class json_file(OutputPlugin):
                                 enabled plugins for that type of plugin.
         :param options_dict: A dict with the options for every plugin.
         """
-
         # TODO: Improve so it contains the plugin configuration too
         for plugin_type, enabled in plugins_dict.iteritems():
             self._enabled_plugins[plugin_type] = enabled        
@@ -93,18 +93,24 @@ class json_file(OutputPlugin):
             return
 
         target_urls = [t.url_string for t in cf.cf.get('targets')]
-        target_domain = cf.cf.get('target_domains')[0]
+
+        target_domain = 'unknown'
+        if cf.cf.get('target_domains'):
+            target_domain = cf.cf.get('target_domains')[0]
+
         enabled_plugins = self._enabled_plugins
+
         def _get_desc(x):
             try:
                 return x._desc
             except AttributeError:
                 return None
-        findings = filter(None, [ _get_desc(x) for x in kb.kb.get_all_findings() ])
-        known_urls = [ str(x) for x in kb.kb.get_all_known_urls() ]
+
+        findings = filter(None, [_get_desc(x) for x in kb.kb.get_all_findings_iter()])
+        known_urls = [str(x) for x in kb.kb.get_all_known_urls()]
                         
         items = []
-        for info in kb.kb.get_all_findings():
+        for info in kb.kb.get_all_findings_iter():
             try:
                 item = {"Severity": info.get_severity(),
                         "Name": info.get_name(),
@@ -117,7 +123,6 @@ class json_file(OutputPlugin):
                         "WASC IDs": getattr(info, "wasc_ids", []),
                         "Tags": getattr(info, "tags", []),
                         "VulnDB ID": info.get_vulndb_id(),
-                        "Severity": info.get_severity(),
                         "Description": info.get_desc()}
                 items.append(item)
             except Exception, e:
@@ -156,24 +161,27 @@ class json_file(OutputPlugin):
           * Target URLs
           * Target domain
           * Findings
-            Each finding in the sequence contains the following fields:
-            * Severity
-            * Name
-            * HTTP method
-            * URL
-            * Vulnerable parameter
-            * Base64 encoded POST-data
-            * Unique vulnerability ID
-            * CWE IDs
-            * WASC IDs
-            * Tags
-            * VulnDB ID
-            * Severity
-            * Description
+        
+        Each finding in the sequence contains the following fields:
+          * Severity
+          * Name
+          * HTTP method
+          * URL
+          * Vulnerable parameter
+          * Base64 encoded POST-data
+          * Unique vulnerability ID
+          * CWE IDs
+          * WASC IDs
+          * Tags
+          * VulnDB ID
+          * Severity
+          * Description
+            
         The JSON plugin should be used for quick and easy integrations with w3af,
         external tools which require more details, such as the HTTP request and
         response associated with each vulnerability, should use the xml_file
         output plugin.
+        
         One configurable parameter exists:
             - output_file
         """

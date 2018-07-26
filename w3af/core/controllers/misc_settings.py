@@ -19,6 +19,8 @@ along with w3af; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 """
+from vulndb import DBVuln
+
 import w3af.core.data.kb.config as cf
 
 from w3af.core.controllers.configurable import Configurable
@@ -27,6 +29,9 @@ from w3af.core.controllers.misc.get_net_iface import get_net_iface
 from w3af.core.data.parsers.utils.form_id_matcher_list import FormIDMatcherList
 from w3af.core.data.options.opt_factory import opt_factory
 from w3af.core.data.options.option_list import OptionList
+from w3af.core.data.db.variant_db import (PATH_MAX_VARIANTS,
+                                          PARAMS_MAX_VARIANTS,
+                                          MAX_EQUAL_FORM_VARIANTS)
 from w3af.core.data.options.option_types import (URL_LIST, COMBO, BOOL, LIST,
                                                  STRING, INT, FORM_ID_LIST)
 
@@ -65,6 +70,10 @@ class MiscSettings(Configurable):
 
         cf.cf.save('form_fuzzing_mode', 'tmb')
 
+        cf.cf.save('path_max_variants', PATH_MAX_VARIANTS)
+        cf.cf.save('params_max_variants', PARAMS_MAX_VARIANTS)
+        cf.cf.save('max_equal_form_variants', MAX_EQUAL_FORM_VARIANTS)
+
         cf.cf.save('max_discovery_time', 120)
 
         cf.cf.save('msf_location', '/opt/metasploit3/bin/')
@@ -92,6 +101,9 @@ class MiscSettings(Configurable):
         # Form exclusion via IDs
         cf.cf.save('form_id_list', FormIDMatcherList('[]'))
         cf.cf.save('form_id_action', EXCLUDE)
+
+        # Language to use when reading from vulndb
+        cf.cf.save('vulndb_language', DBVuln.DEFAULT_LANG)
 
     def get_options(self):
         """
@@ -181,11 +193,43 @@ class MiscSettings(Configurable):
                           desc, INT, help=h, tabid='Core settings')
         ol.add(opt)
 
+        desc = 'Limit requests for each URL sub-path'
+        h = ('Limit how many requests are performed for each URL sub-path'
+             ' during crawling. For example, if the application links to'
+             ' three products: /product/1 /product/2 and /product/3, and'
+             ' this variable is set to two, only the first two URLs:'
+             ' /product/1 and /product/2 will be crawled.')
+        opt = opt_factory('path_max_variants',
+                          cf.cf.get('path_max_variants'),
+                          desc, INT, help=h, tabid='Core settings')
+        ol.add(opt)
+
+        desc = 'Limit requests for each URL and parameter set'
+        h = ('Limit how many requests are performed for each URL and parameter'
+             ' set. For example, if the application links to three products:'
+             ' /product?id=1 , /product?id=2 and /product?id=3, and this'
+             ' variable is set to two, only the first two URLs:'
+             ' /product?id=1 and /product?id=2 will crawled.')
+        opt = opt_factory('params_max_variants',
+                          cf.cf.get('params_max_variants'),
+                          desc, INT, help=h, tabid='Core settings')
+        ol.add(opt)
+
+        desc = 'Limit requests for similar forms'
+        h = ('Limit the number of HTTP requests to be sent to similar forms'
+             ' during crawling. For example, if the application has multiple'
+             ' HTML forms with the same parameters and different URLs set in'
+             ' actions then only the configured number of forms are crawled.')
+        opt = opt_factory('max_equal_form_variants',
+                          cf.cf.get('max_equal_form_variants'),
+                          desc, INT, help=h, tabid='Core settings')
+        ol.add(opt)
+
         #
         # Network parameters
         #
-        desc = 'Local interface name to use when sniffing, doing reverse'\
-               ' connections, etc.'
+        desc = ('Local interface name to use when sniffing, doing reverse'
+                ' connections, etc.')
         opt = opt_factory('interface', cf.cf.get('interface'), desc,
                           STRING, tabid='Network settings')
         ol.add(opt)
@@ -238,6 +282,20 @@ class MiscSettings(Configurable):
                           desc, STRING, tabid='Metasploit')
         ol.add(opt)
 
+        #
+        # Language options
+        #
+        d = 'Set the language to use when reading from the vulnerability database'
+        h = ('The vulnerability database stores descriptions, fix guidance, tags,'
+             ' references and much more about each vulnerability the scanner can'
+             ' identify. The database supports translations, so this information'
+             ' can be in many languages. Use this setting to choose the language'
+             ' in which the information will be displayed and stored in reports.')
+        options = DBVuln.get_all_languages()
+        opt = opt_factory('vulndb_language', options, d, COMBO, help=h,
+                          tabid='Language')
+        ol.add(opt)
+
         return ol
 
     def get_desc(self):
@@ -257,7 +315,9 @@ class MiscSettings(Configurable):
                    'form_fuzzing_mode', 'max_discovery_time',
                    'fuzzable_headers', 'interface', 'local_ip_address',
                    'msf_location', 'stop_on_first_exception',
-                   'non_targets', 'form_id_action', 'form_id_list')
+                   'non_targets', 'form_id_action', 'form_id_list',
+                   'path_max_variants', 'params_max_variants',
+                   'max_equal_form_variants', 'vulndb_language')
 
         for name in to_save:
             cf.cf.save(name, options_list[name].get_value())

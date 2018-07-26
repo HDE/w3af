@@ -26,7 +26,6 @@ import traceback
 import StringIO
 
 from lxml import etree
-from collections import namedtuple
 
 import w3af.core.data.kb.config as cf
 import w3af.core.controllers.output_manager as om
@@ -39,7 +38,24 @@ from w3af.core.data.misc.encoding import smart_unicode
 from w3af.core.controllers.exceptions import ParserException
 
 
-Tag = namedtuple('Tag', ('name', 'attrib', 'text'))
+class Tag(object):
+    __slots__ = ('name', 'attrib', 'text')
+
+    def __init__(self, name, attrib, text=None):
+        self.name = name
+        self.attrib = attrib
+        self.text = text
+
+    def to_dict(self):
+        return {'name': self.name,
+                'attrib': self.attrib,
+                'text': self.text}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(data['name'],
+                   data['attrib'],
+                   data['text'])
 
 
 class SGMLParser(BaseParser):
@@ -52,9 +68,8 @@ class SGMLParser(BaseParser):
     """
     ANY_TAG_MATCH = re.compile('(<.*?>)', re.UNICODE)
 
-    EMAIL_RE = re.compile(
-        '([\w\.%-]{1,45}@([A-Z0-9\.-]{1,45}\.){1,10}[A-Z]{2,4})',
-        re.I | re.U)
+    EMAIL_RE = re.compile('([\w\.%-]{1,45}@([A-Z0-9\.-]{1,45}\.){1,10}[A-Z]{2,4})',
+                          re.I | re.U)
 
     META_URL_REDIR_RE = re.compile('.*?URL.*?=(.*)', re.I | re.U)
 
@@ -217,7 +232,8 @@ class SGMLParser(BaseParser):
                                   html=True,
                                   recover=True,
                                   encoding=DEFAULT_ENCODING,
-                                  huge_tree=False)
+                                  huge_tree=False,
+                                  resolve_entities=False)
 
         for event, elem in context:
             try:
@@ -280,7 +296,7 @@ class SGMLParser(BaseParser):
         # https://github.com/andresriancho/w3af/issues/8695
         if not resp_body:
             # Don't even try to parse this response, it's empty anyways.
-            raise StopIteration
+            return
 
         body_io = StringIO.StringIO(resp_body.encode(DEFAULT_ENCODING))
 
@@ -372,6 +388,7 @@ class SGMLParser(BaseParser):
                 and not value.startswith('tel:')
                 and not value.startswith('callto:')
                 and not value.startswith('mailto:')
+                and not value.startswith('data:image/')
                 and not value in self.APACHE_INDEXING)
 
     def _find_references(self, tag, tag_name, attrs):
@@ -491,7 +508,6 @@ class SGMLParser(BaseParser):
         """
         return [x[1] for x in self._tag_and_url if x[0] == tag_type]
 
-    ## Methods for tags handling ##
     def _handle_base_tag_start(self, tag, tag_name, attrs):
         # Override base url
         try:
